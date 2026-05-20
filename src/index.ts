@@ -7,26 +7,30 @@
  *   GET /api/log?account=<id>&zone=<id>&...        → individuální eventy (firewallEventsAdaptive)
  *   GET /api/stats?account=<id>&zone=<id>&...      → agregace (firewallEventsAdaptiveGroups)
  *
- * Pozn.: cesty se záměrně nejmenují /api/events ani /api/summary — ty by blokovaly
- * běžné adblockery (EasyPrivacy).
+ * Konfigurace (vše jako Worker secrets — nic v repu):
+ *   Pro každý CF účet vytvoř TŘI secrety:
+ *     CFACC_<ID>_LABEL     – co se ukáže v UI dropdownu (např. "ACME s.r.o.")
+ *     CFACC_<ID>_ACCOUNT   – Cloudflare Account ID (32 hex znaků)
+ *     CFACC_<ID>_TOKEN     – Cloudflare API token (read-only)
+ *   <ID> je libovolný krátký identifikátor [A-Z0-9_], objeví se v URL ?account=<id>.
  *
- * Konfigurace (vše jako Worker secret — nic v plaintextu v repu):
- *   ACCOUNTS = JSON pole, např.
- *     [
- *       { "id": "personal", "label": "Můj účet",  "accountId": "abc123…", "token": "cf_xxx" },
- *       { "id": "acme",     "label": "ACME s.r.o.","accountId": "def456…", "token": "cf_yyy" }
- *     ]
- *   - `id`        — interní klíč použitý v query stringu (krátký, bez mezer)
- *   - `label`     — co se ukáže v UI
- *   - `accountId` — Cloudflare Account ID
- *   - `token`     — API token s právy: Account Analytics: Read, Zone: Read, Analytics: Read
+ *   Příklad — dva účty:
+ *     CFACC_PERSONAL_LABEL   = "Můj účet"
+ *     CFACC_PERSONAL_ACCOUNT = "abc123..."
+ *     CFACC_PERSONAL_TOKEN   = "cf_xxx"
+ *     CFACC_ACME_LABEL       = "ACME s.r.o."
+ *     CFACC_ACME_ACCOUNT     = "def456..."
+ *     CFACC_ACME_TOKEN       = "cf_yyy"
+ *
+ *   Přidání nového účtu = jen 3 nové secrety, nic existujícího se nemění.
+ *   Rotace tokenu = přepsat jen CFACC_<ID>_TOKEN.
  *
  * Ochrana přístupu k samotnému dashboardu se neřeší v kódu — Worker je za Cloudflare Access.
  */
 
 export interface Env {
   ASSETS: Fetcher;
-  ACCOUNTS: string; // JSON string (Worker secret)
+  [key: string]: unknown; // CFACC_*_LABEL / _ACCOUNT / _TOKEN
 }
 
 type Account = {
@@ -66,23 +70,31 @@ function err(status: number, message: string): Response {
 }
 
 function loadAccounts(env: Env): Account[] {
-  if (!env.ACCOUNTS) throw new Error("ACCOUNTS secret is not set");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(env.ACCOUNTS);
-  } catch {
-    throw new Error("ACCOUNTS secret is not valid JSON");
+  const ids = new Set<string>();
+  for (const key of Object.keys(env)) {
+    const m = key.match(/^CFACC_([A-Z0-9_]+)_(LABEL|ACCOUNT|TOKEN)$/i);
+    if (m) ids.add(m[1].toUpperCase());
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("ACCOUNTS must be a non-empty JSON array");
-  }
-  const accounts = parsed as Partial<Account>[];
-  for (const a of accounts) {
-    if (!a.id || !a.label || !a.accountId || !a.token) {
-      throw new Error("Each account needs 'id', 'label', 'accountId', 'token'");
+  const out: Account[] = [];
+  const incomplete: string[] = [];
+  for (const id of ids) {
+    const label = env[`CFACC_${id}_LABEL`];
+    const accountId = env[`CFACC_${id}_ACCOUNT`];
+    const token = env[`CFACC_${id}_TOKEN`];
+    if (typeof label === "string" && typeof accountId === "string" && typeof token === "string") {
+      out.push({ id: id.toLowerCase(), label, accountId, token });
+    } else {
+      incomplete.push(id);
     }
   }
-  return accounts as Account[];
+  if (out.length === 0) {
+    throw new Error(
+      incomplete.length
+        ? `Account(s) ${incomplete.join(", ")} are missing one of LABEL/ACCOUNT/TOKEN secrets`
+        : "No accounts configured — set CFACC_<ID>_LABEL, _ACCOUNT, _TOKEN as Worker secrets",
+    );
+  }
+  return out.sort((a, b) => a.label.localeCompare(b.label, "cs"));
 }
 
 function pickAccount(env: Env, url: URL): Account {

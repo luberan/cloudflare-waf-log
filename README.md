@@ -5,58 +5,51 @@ Funguje na **Free tieru** (retence eventů 24 h).
 
 ## Co umí
 
-- **Přepínání mezi Cloudflare účty** (vlastní i zákaznické) — každý účet má svůj API token
+- **Přepínání mezi Cloudflare účty** — každý účet má svůj API token
 - Přepínání mezi zónami v rámci zvoleného účtu
 - Filtrování podle akce: `block`, `managed_challenge`, `jschallenge`, `challenge`, `allow`, `log`, `skip`
-- Filtrování podle zemí (ISO2, např. `CZ,DE,RU`) a hostname
-- Časový rozsah 1 / 6 / 24 h (Free — víc retence nemá)
+- Filtrování podle zemí (ISO2) a hostname
+- Časový rozsah 1 / 6 / 24 h (Free tier — víc retence nedá)
 - KPI karty + grafy: stacked time series, podle akce, top země, top hostnames, zdroj (`source`), top rule IDs
-- Tabulka s posledními ~500 eventy (čas, akce, IP, země, host, cesta, ray ID, …)
+- Tabulka s posledními ~500 eventy
 
 ## Architektura
 
 | Část | Soubor | Co dělá |
 |---|---|---|
-| Worker (TypeScript) | [src/index.ts](src/index.ts) | API endpointy `/api/accounts`, `/api/zones`, `/api/events`, `/api/summary` — proxy na Cloudflare GraphQL Analytics API |
+| Worker (TypeScript) | [src/index.ts](src/index.ts) | API endpointy `/api/accounts`, `/api/zones`, `/api/log`, `/api/stats` — proxy na Cloudflare GraphQL Analytics API |
 | Dashboard | [public/index.html](public/index.html) | Vanilla HTML/JS + Chart.js z CDN (žádný build step) |
 | Konfigurace | [wrangler.jsonc](wrangler.jsonc) | Worker entrypoint + assets binding (nic citlivého) |
 
 ## Konfigurace tajemství
 
-**Vše citlivé je v jednom Worker secretu** `ACCOUNTS` — JSON pole. V repu ani ve `wrangler.jsonc` nic není.
+**Vše citlivé je jen ve Worker secretech.** V repu ani ve `wrangler.jsonc` nic není.
 
-Příklad obsahu `ACCOUNTS`:
+Pro **každý CF účet** vytvoř TŘI secrety:
 
-```json
-[
-  {
-    "id": "personal",
-    "label": "Můj účet",
-    "accountId": "abc123abc123abc123abc123abc123",
-    "token": "cf_token_xxx"
-  },
-  {
-    "id": "acme",
-    "label": "ACME s.r.o.",
-    "accountId": "def456def456def456def456def456",
-    "token": "cf_token_yyy"
-  }
-]
-```
-
-Klíče:
-- `id` — krátký interní identifikátor (objevuje se v URL `?account=...`)
-- `label` — co se zobrazí v UI dropdownu
-- `accountId` — Cloudflare Account ID (najdeš v CF dashboardu vpravo dole u libovolné zóny daného účtu)
-- `token` — API token vygenerovaný **v rámci toho účtu** s těmito právy:
-
-| Scope | Resource | Permission |
+| Secret name | Popis | Příklad |
 |---|---|---|
-| Account | tento účet | `Account Analytics: Read` |
-| Zone | All zones (toho účtu) | `Zone: Read` |
-| Zone | All zones (toho účtu) | `Analytics: Read` |
+| `CFACC_<ID>_LABEL` | Co se ukáže v UI dropdownu | `Můj účet` |
+| `CFACC_<ID>_ACCOUNT` | Cloudflare Account ID (32 hex znaků) | `abc123abc123...` |
+| `CFACC_<ID>_TOKEN` | Cloudflare API token (read-only) | `cf_xxx...` |
 
-> U zákaznických účtů si nech token vygenerovat zákazníkem (nebo na účtu admin) — token pak vloží jako další položku pole.
+`<ID>` je libovolný krátký identifikátor, který si zvolíš (`PERSONAL`, `ACME`, `NOVA`, …). Objevuje se v URL `?account=<id>` (Worker ho normalizuje na lowercase).
+
+**Přidání nového účtu** = vytvoříš tři nové secrety. Žádné existující se nemění a nemusíš nikam ukládat staré tokeny.
+**Rotace tokenu** = přepíšeš jen `CFACC_<ID>_TOKEN`.
+
+### Cloudflare API token — jak ho vytvořit (nové UI 2026)
+
+1. **Cloudflare dashboard → My Profile → API Tokens → Create Token → Custom token**
+2. Pojmenuj např. `waf-log-acme`
+3. **Permission policy** → klikni na resource selector a vyber **Entire Account** (pro daný účet)
+4. V kategoriích zaškrtni:
+   - **Analytics & Logs → Analytics : Read**
+   - **DNS & Zones → Zone : Read**
+5. *(volitelně)* Client IP filtering, TTL — můžeš nechat default
+6. **Continue → Create Token** → zkopíruj token (zobrazí se jen jednou)
+
+> **Pozor**: token vždy generuj **přepnutý do toho účtu, jehož data chceš číst** (přepínač účtu vlevo nahoře v CF dashboardu). Token je vázaný na účet, kde byl vytvořen.
 
 ## Setup
 
@@ -66,56 +59,58 @@ Klíče:
 npm install
 
 # Vytvoř .dev.vars (NEcommitovat — je v .gitignore).
-# Hodnota MUSÍ být na jednom řádku, jinak ji Wrangler nepřečte:
-'ACCOUNTS=[{"id":"personal","label":"Můj účet","accountId":"abc...","token":"cf_xxx"}]' `
-  | Out-File -Encoding utf8 .dev.vars
+@'
+CFACC_PERSONAL_LABEL=Můj účet
+CFACC_PERSONAL_ACCOUNT=abc123abc123abc123abc123abc123
+CFACC_PERSONAL_TOKEN=cf_xxx
+'@ | Out-File -Encoding utf8 .dev.vars
 
 npm run dev
 ```
 
 Otevři <http://localhost:8787>.
 
-### Produkce — Worker secret
+### Produkce — Worker secrets
 
+V dashboardu: **Workers & Pages → tvůj Worker → Settings → Variables and Secrets → Add → Type: Secret**
+
+Pro každý účet přidej tři secrety (`CFACC_<ID>_LABEL`, `CFACC_<ID>_ACCOUNT`, `CFACC_<ID>_TOKEN`).
+Po přidání všech klikni **Deploy** (jednou — aplikuje všechny najednou).
+
+Nebo přes CLI:
 ```powershell
-npx wrangler secret put ACCOUNTS
-# pak vlož JSON (na jednom řádku) a stiskni Enter / Ctrl+Z
+"Můj účet"  | npx wrangler secret put CFACC_PERSONAL_LABEL
+"abc123..."  | npx wrangler secret put CFACC_PERSONAL_ACCOUNT
+"cf_xxx..." | npx wrangler secret put CFACC_PERSONAL_TOKEN
 ```
-
-Nebo v dashboardu: **Workers & Pages → tvůj Worker → Settings → Variables and Secrets → Add → Type: Secret → Name: `ACCOUNTS`**.
-
-> Po každé změně `ACCOUNTS` (přidání nového účtu, rotace tokenu) jen znovu nahraj secret — kód redeployovat nemusíš.
 
 ### Deploy přes GitHub → Cloudflare Workers Builds
 
 1. Push repo na GitHub.
 2. **Workers & Pages → Create → Workers → Connect to Git**, vyber repo.
-3. Build settings (Workers Builds detekuje automaticky):
-   - Build command: *(prázdné)*
-   - Deploy command: `npx wrangler deploy`
-4. Po prvním deployi nastav secret `ACCOUNTS` (viz výše).
+3. Build command: *(prázdné)*, Deploy command: `npx wrangler deploy`.
+4. Po prvním deployi přidej secrety (viz výše).
 5. Každý push do `main` od teď spustí auto deploy.
 
 ### Ochrana přístupu — Cloudflare Access (Zero Trust)
 
-Worker sám o sobě je veřejný — proto MUSÍ být před ním Access policy, jinak by k datům zákazníků mohl kdokoliv se znalostí URL:
+Worker je veřejný — proto MUSÍ být před ním Access policy:
 
 1. **Zero Trust dashboard → Access → Applications → Add application → Self-hosted**
-2. Domain: `<worker-name>.<tvuj-subdomain>.workers.dev` (nebo custom doména)
+2. Domain: `<worker-name>.<tvuj-subdomain>.workers.dev`
 3. Policy: `Allow` pro tvůj email (One-time PIN / Google / GitHub IdP)
-4. Hotovo — bez autentizace IdP nikdo na dashboard nedosáhne.
 
 ## Omezení Free tieru
 
-- **Retence WAF eventů**: 24 h (Pro 72 h, Biz 30 d, Ent 6 m) — per zóna, ne per účet
+- **Retence WAF eventů**: 24 h (Pro 72 h, Biz 30 d, Ent 6 m)
 - **Worker quoty**: 100 000 req/den, 10 ms CPU
-- **GraphQL**: rate limit ~1 200 req/5 min na token (každý účet má vlastní → škáluje s počtem účtů)
+- **GraphQL**: ~1 200 req/5 min na token (každý účet má vlastní)
 
 ## Bezpečnostní poznámky
 
-- Tokeny v `ACCOUNTS` mají read-only práva — i v případě úniku secretu nelze nic v CF účtech měnit
+- Tokeny mají read-only práva — i v případě úniku secretů nelze nic v CF účtech měnit
 - Frontend nikdy nedostane token — `GET /api/accounts` vrací jen `id` + `label`
-- Worker je za Cloudflare Access — nikdo neautentizovaný se k API nedostane
+- Worker musí být za Cloudflare Access — jinak je dashboard veřejný
 - `.dev.vars` je v [.gitignore](.gitignore)
 
 ## Možná rozšíření
