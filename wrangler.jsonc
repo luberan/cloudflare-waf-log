@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-waf-log",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true
+  }
+  // Žádné env vars ani tajemství zde — vše se konfiguruje jako Worker secret:
+  //   ACCOUNTS = JSON pole účtů (id, label, accountId, token)
+  //   Nastavit přes:  wrangler secret put ACCOUNTS
+  //   Nebo v Cloudflare dashboardu → Worker → Settings → Variables and Secrets → Secrets
+}

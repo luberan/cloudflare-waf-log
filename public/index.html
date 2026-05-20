@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>WAF Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262b36; --fg: #e6e8ee; --muted: #8a93a6;
+    --accent: #f6821f; --ok: #2ecc71; --warn: #f1c40f; --bad: #e74c3c; --info: #3498db;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  header { display: flex; align-items: center; gap: 1rem; padding: .75rem 1rem; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  header .grow { flex: 1; }
+  select, input, button { background: #0c0e13; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: .4rem .55rem; font: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  main { padding: 1rem; display: grid; gap: 1rem; grid-template-columns: repeat(12, 1fr); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  .panel h2 { margin: 0 0 .75rem; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  .col-12 { grid-column: span 12; } .col-8 { grid-column: span 8; } .col-6 { grid-column: span 6; } .col-4 { grid-column: span 4; } .col-3 { grid-column: span 3; }
+  @media (max-width: 1100px) { .col-8, .col-6, .col-4, .col-3 { grid-column: span 12; } }
+  .filters { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .filters label { color: var(--muted); display: inline-flex; align-items: center; gap: .35rem; }
+  .stat { display: flex; flex-direction: column; gap: .25rem; }
+  .stat .v { font-size: 1.6rem; font-weight: 700; }
+  .stat .l { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: .35rem .5rem; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { max-height: 420px; overflow: auto; }
+  .badge { padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .b-block { background: rgba(231,76,60,.15); color: #ff7a6b; }
+  .b-allow { background: rgba(46,204,113,.15); color: #6cf09a; }
+  .b-challenge, .b-managed_challenge, .b-jschallenge { background: rgba(241,196,15,.15); color: #ffd84d; }
+  .b-log, .b-skip { background: rgba(52,152,219,.15); color: #74c3ff; }
+  .muted { color: var(--muted); }
+  .err { background: rgba(231,76,60,.15); color: #ff7a6b; padding: .5rem .75rem; border-radius: 6px; border: 1px solid rgba(231,76,60,.3); }
+  .chart-wrap { position: relative; height: 260px; }
+  .chart-wrap.tall { height: 320px; }
+  .row-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+  .chip { background: #0c0e13; border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 11.5px; cursor: pointer; user-select: none; }
+  .chip.active { background: var(--accent); color: #000; border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛡 WAF Dashboard</h1>
+  <label>Účet:
+    <select id="account"></select>
+  </label>
+  <label>Zóna:
+    <select id="zone"></select>
+  </label>
+  <label>Rozsah:
+    <select id="range">
+      <option value="1">poslední 1 h</option>
+      <option value="6">posledních 6 h</option>
+      <option value="24" selected>posledních 24 h</option>
+    </select>
+  </label>
+  <div class="row-actions" id="actionChips">
+    <span class="chip" data-action="block">block</span>
+    <span class="chip" data-action="managed_challenge">managed_challenge</span>
+    <span class="chip" data-action="jschallenge">jschallenge</span>
+    <span class="chip" data-action="challenge">challenge</span>
+    <span class="chip" data-action="allow">allow</span>
+    <span class="chip" data-action="log">log</span>
+    <span class="chip" data-action="skip">skip</span>
+  </div>
+  <label>Host:
+    <input id="hostFilter" type="text" placeholder="napr. www.example.com" size="22" />
+  </label>
+  <label>Země:
+    <input id="countryFilter" type="text" placeholder="napr. CZ,DE" size="10" />
+  </label>
+  <span class="grow"></span>
+  <button id="refresh" class="primary">Načíst</button>
+</header>
+
+<div id="error" class="err" style="display:none;margin:1rem"></div>
+
+<main>
+  <section class="panel col-3 stat"><span class="l">Celkem eventů</span><span class="v" id="kpiTotal">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Blokované</span><span class="v" id="kpiBlock">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Challenge</span><span class="v" id="kpiChallenge">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Allow / Log</span><span class="v" id="kpiAllow">–</span></section>
+
+  <section class="panel col-8"><h2>Eventy v čase (po hodině)</h2><div class="chart-wrap tall"><canvas id="chartSeries"></canvas></div></section>
+  <section class="panel col-4"><h2>Podle akce</h2><div class="chart-wrap"><canvas id="chartAction"></canvas></div></section>
+
+  <section class="panel col-6"><h2>Top země</h2><div class="chart-wrap"><canvas id="chartCountry"></canvas></div></section>
+  <section class="panel col-6"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
+
+  <section class="panel col-6"><h2>Zdroj (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource"></canvas></div></section>
+  <section class="panel col-6"><h2>Top rule IDs</h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+
+  <section class="panel col-12"><h2>Eventy <span class="muted" id="eventsCount"></span></h2>
+    <div class="scroll"><table id="tblEvents"><thead><tr>
+      <th>Čas</th><th>Akce</th><th>Zdroj</th><th>Země</th><th>IP</th><th>Host</th><th>Cesta</th><th>Metoda</th><th>Rule</th><th>Ray</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { actions: new Set(), charts: {} };
+
+const PALETTE = ['#e74c3c','#f1c40f','#3498db','#2ecc71','#9b59b6','#1abc9c','#e67e22','#34495e','#ff7675','#74b9ff'];
+const ACTION_COLOR = { block:'#e74c3c', managed_challenge:'#f1c40f', jschallenge:'#f39c12', challenge:'#e67e22', allow:'#2ecc71', log:'#3498db', skip:'#9b59b6' };
+
+async function api(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error((await r.json().catch(()=>({error:r.statusText}))).error || r.statusText);
+  return r.json();
+}
+
+function buildQuery() {
+  const p = new URLSearchParams();
+  p.set('account', $('#account').value);
+  p.set('zone', $('#zone').value);
+  const hours = Number($('#range').value);
+  const until = new Date();
+  const since = new Date(until.getTime() - hours*3600*1000);
+  p.set('since', since.toISOString());
+  p.set('until', until.toISOString());
+  if (state.actions.size) p.set('action', [...state.actions].join(','));
+  const host = $('#hostFilter').value.trim(); if (host) p.set('host', host);
+  const country = $('#countryFilter').value.trim(); if (country) p.set('country', country.toUpperCase());
+  return p.toString();
+}
+
+function showError(msg) { const e = $('#error'); if (msg) { e.textContent = msg; e.style.display = 'block'; } else e.style.display = 'none'; }
+
+function destroyChart(key) { if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; } }
+
+function barChart(canvasId, labels, values, colors) {
+  destroyChart(canvasId);
+  state.charts[canvasId] = new Chart($('#'+canvasId), {
+    type: 'bar',
+    data: { labels, datasets: [{ data: values, backgroundColor: colors || PALETTE, borderWidth: 0 }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8a93a6' } }, y: { ticks: { color: '#e6e8ee' } } }, maintainAspectRatio: false }
+  });
+}
+
+function doughnut(canvasId, labels, values, colors) {
+  destroyChart(canvasId);
+  state.charts[canvasId] = new Chart($('#'+canvasId), {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data: values, backgroundColor: colors, borderColor: '#171a21', borderWidth: 2 }] },
+    options: { plugins: { legend: { position: 'bottom', labels: { color: '#e6e8ee' } } }, maintainAspectRatio: false }
+  });
+}
+
+function timeSeries(canvasId, series) {
+  destroyChart(canvasId);
+  // pivot to per-action
+  const hours = [...new Set(series.map(s => s.hour))].sort();
+  const actions = [...new Set(series.map(s => s.action))];
+  const datasets = actions.map(a => ({
+    label: a,
+    data: hours.map(h => {
+      const m = series.find(x => x.hour === h && x.action === a);
+      return m ? m.count : 0;
+    }),
+    backgroundColor: ACTION_COLOR[a] || '#888',
+    borderColor: ACTION_COLOR[a] || '#888',
+    stack: 's',
+  }));
+  state.charts[canvasId] = new Chart($('#'+canvasId), {
+    type: 'bar',
+    data: { labels: hours.map(h => h.replace('T',' ').slice(5,16)), datasets },
+    options: { plugins: { legend: { labels: { color: '#e6e8ee' } } }, scales: { x: { stacked: true, ticks: { color: '#8a93a6' } }, y: { stacked: true, ticks: { color: '#8a93a6' } } }, maintainAspectRatio: false }
+  });
+}
+
+function renderRulesTable(rows) {
+  const tbody = $('#tblRules tbody');
+  tbody.innerHTML = rows.slice(0, 30).map(r =>
+    `<tr><td>${escapeHtml(r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+}
+
+function renderEvents(events) {
+  $('#eventsCount').textContent = `(${events.length})`;
+  const tbody = $('#tblEvents tbody');
+  tbody.innerHTML = events.map(e => `
+    <tr>
+      <td>${(e.datetime||'').replace('T',' ').slice(0,19)}</td>
+      <td><span class="badge b-${e.action}">${e.action||''}</span></td>
+      <td>${escapeHtml(e.source||'')}</td>
+      <td>${escapeHtml(e.clientCountryName||'')}</td>
+      <td>${escapeHtml(e.clientIP||'')}</td>
+      <td>${escapeHtml(e.clientRequestHTTPHost||'')}</td>
+      <td title="${escapeHtml(e.clientRequestPath||'')}">${escapeHtml((e.clientRequestPath||'').slice(0,60))}</td>
+      <td>${escapeHtml(e.clientRequestHTTPMethodName||'')}</td>
+      <td>${escapeHtml(e.ruleId||'')}</td>
+      <td>${escapeHtml(e.rayName||'')}</td>
+    </tr>
+  `).join('');
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function loadZones() {
+  const acc = $('#account').value;
+  if (!acc) return;
+  showError(''); $('#refresh').disabled = true;
+  try {
+    const { zones } = await api('/api/zones?account=' + encodeURIComponent(acc));
+    if (!zones.length) { $('#zone').innerHTML = ''; showError('Účet nemá žádné zóny nebo token nemá Zone: Read.'); return; }
+    $('#zone').innerHTML = zones.map(z => `<option value="${z.id}">${escapeHtml(z.name)} (${z.plan||'?'})</option>`).join('');
+    await load();
+  } catch (e) { showError(e.message); }
+  finally { $('#refresh').disabled = false; }
+}
+
+async function load() {
+  if (!$('#zone').value) return;
+  showError(''); $('#refresh').disabled = true;
+  try {
+    const q = buildQuery();
+    const [summary, events] = await Promise.all([api('/api/summary?'+q), api('/api/events?'+q+'&limit=500')]);
+
+    // KPIs
+    const total = summary.byAction.reduce((s, r) => s + r.count, 0);
+    const get = (k) => summary.byAction.find(r => r.key === k)?.count || 0;
+    $('#kpiTotal').textContent = total.toLocaleString('cs-CZ');
+    $('#kpiBlock').textContent = get('block').toLocaleString('cs-CZ');
+    $('#kpiChallenge').textContent = (get('managed_challenge')+get('jschallenge')+get('challenge')).toLocaleString('cs-CZ');
+    $('#kpiAllow').textContent = (get('allow')+get('log')).toLocaleString('cs-CZ');
+
+    timeSeries('chartSeries', summary.series);
+    doughnut('chartAction', summary.byAction.map(r=>r.key), summary.byAction.map(r=>r.count),
+      summary.byAction.map(r => ACTION_COLOR[r.key] || '#888'));
+    barChart('chartCountry', summary.byCountry.slice(0,15).map(r=>r.key||'?'), summary.byCountry.slice(0,15).map(r=>r.count));
+    barChart('chartHost', summary.byHost.slice(0,15).map(r=>r.key||'?'), summary.byHost.slice(0,15).map(r=>r.count));
+    doughnut('chartSource', summary.bySource.map(r=>r.key), summary.bySource.map(r=>r.count), PALETTE);
+    renderRulesTable(summary.byRule);
+    renderEvents(events.events);
+  } catch (e) {
+    showError(e.message);
+  } finally { $('#refresh').disabled = false; }
+}
+
+async function init() {
+  try {
+    const { accounts } = await api('/api/accounts');
+    if (!accounts.length) { showError('Žádné účty nejsou nakonfigurované v ACCOUNTS secretu.'); return; }
+    $('#account').innerHTML = accounts.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join('');
+    document.querySelectorAll('#actionChips .chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const a = chip.dataset.action;
+        if (state.actions.has(a)) state.actions.delete(a); else state.actions.add(a);
+        chip.classList.toggle('active');
+      });
+    });
+    $('#refresh').addEventListener('click', load);
+    $('#account').addEventListener('change', loadZones);
+    $('#zone').addEventListener('change', load);
+    $('#range').addEventListener('change', load);
+    await loadZones();
+  } catch (e) { showError(e.message); }
+}
+init();
+</script>
+</body>
+</html>
