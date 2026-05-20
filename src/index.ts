@@ -4,8 +4,11 @@
  * Endpoints:
  *   GET /api/accounts                              → seznam nakonfigurovaných účtů (id + label)
  *   GET /api/zones?account=<id>                    → seznam zón daného účtu
- *   GET /api/events?account=<id>&zone=<id>&...     → individuální eventy (firewallEventsAdaptive)
- *   GET /api/summary?account=<id>&zone=<id>&...    → agregace (firewallEventsAdaptiveGroups)
+ *   GET /api/log?account=<id>&zone=<id>&...        → individuální eventy (firewallEventsAdaptive)
+ *   GET /api/stats?account=<id>&zone=<id>&...      → agregace (firewallEventsAdaptiveGroups)
+ *
+ * Pozn.: cesty se záměrně nejmenují /api/events ani /api/summary — ty by blokovaly
+ * běžné adblockery (EasyPrivacy).
  *
  * Konfigurace (vše jako Worker secret — nic v plaintextu v repu):
  *   ACCOUNTS = JSON pole, např.
@@ -323,8 +326,8 @@ export default {
       const account = pickAccount(env, url);
 
       if (url.pathname === "/api/zones") return await listZones(account);
-      if (url.pathname === "/api/events") return await getEvents(account, parseFilters(url));
-      if (url.pathname === "/api/summary") return await getSummary(account, parseFilters(url));
+      if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
+      if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
 
       return err(404, "not found");
     } catch (e) {
