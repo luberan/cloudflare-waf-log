@@ -322,6 +322,75 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   return json({ byAction, byCountry, byHost, bySource, byRule, series });
 }
 
+async function debug(acc: Account): Promise<Response> {
+  const out: Record<string, unknown> = {
+    configured: { id: acc.id, label: acc.label, accountIdInSecret: acc.accountId },
+  };
+
+  // 1) verify token
+  try {
+    const r = await fetch(`${CF_API}/user/tokens/verify`, {
+      headers: { authorization: `Bearer ${acc.token}` },
+    });
+    out.tokenVerify = await r.json();
+  } catch (e) {
+    out.tokenVerify = { error: String(e) };
+  }
+
+  // 2) accounts visible to token
+  try {
+    const r = await fetch(`${CF_API}/accounts?per_page=20`, {
+      headers: { authorization: `Bearer ${acc.token}` },
+    });
+    const j = (await r.json()) as { result?: { id: string; name: string }[] };
+    out.accountsVisibleToToken = j.result?.map((a) => ({ id: a.id, name: a.name }));
+  } catch (e) {
+    out.accountsVisibleToToken = { error: String(e) };
+  }
+
+  // 3) zones in configured account
+  let firstZone: string | undefined;
+  try {
+    const r = await fetch(
+      `${CF_API}/zones?account.id=${encodeURIComponent(acc.accountId)}&per_page=10`,
+      { headers: { authorization: `Bearer ${acc.token}` } },
+    );
+    const j = (await r.json()) as {
+      result?: { id: string; name: string; account: { id: string; name: string } }[];
+    };
+    out.zonesInConfiguredAccount = j.result?.map((z) => ({
+      id: z.id,
+      name: z.name,
+      accountId: z.account.id,
+      accountName: z.account.name,
+    }));
+    firstZone = j.result?.[0]?.id;
+  } catch (e) {
+    out.zonesInConfiguredAccount = { error: String(e) };
+  }
+
+  // 4) GraphQL test on first zone
+  if (firstZone) {
+    try {
+      const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const until = new Date().toISOString();
+      const body = JSON.stringify({
+        query: `{ viewer { zones(filter:{zoneTag:"${firstZone}"}) { firewallEventsAdaptiveGroups(filter:{datetime_geq:"${since}",datetime_leq:"${until}"},limit:1) { count } } } }`,
+      });
+      const r = await fetch(CF_GRAPHQL, {
+        method: "POST",
+        headers: { authorization: `Bearer ${acc.token}`, "content-type": "application/json" },
+        body,
+      });
+      out.graphqlTest = { zone: firstZone, response: await r.json() };
+    } catch (e) {
+      out.graphqlTest = { error: String(e) };
+    }
+  }
+
+  return json(out);
+}
+
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
 export default {
@@ -340,6 +409,7 @@ export default {
       if (url.pathname === "/api/zones") return await listZones(account);
       if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
       if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
+      if (url.pathname === "/api/debug") return await debug(account);
 
       return err(404, "not found");
     } catch (e) {
