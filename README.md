@@ -43,7 +43,6 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
 | `GET /api/zones?account=<id>` | Seznam zón daného účtu |
 | `GET /api/stats?account=<id>&zone=<id>&...filters` | Agregace + posledních 500 eventů (vše v jednom requestu) |
 | `GET /api/log?account=<id>&zone=<id>&...filters` | Jen eventy (limit ovládatelný přes `&limit=`) |
-| `GET /api/debug?account=<id>` | Diagnostika — co token vidí, GraphQL test (užitečné při řešení chyb permissionů) |
 
 ### Pozn. k Free tieru — agregace v Workeru
 
@@ -80,15 +79,6 @@ Pro **každý CF účet** vytvoř TŘI secrety:
    - **Analytics & Logs → Analytics : Read**
 5. *(volitelně)* Client IP filtering, TTL — nech default
 6. **Continue → Create Token** → zkopíruj (zobrazí se jen jednou)
-
-### Ověření, že token funguje
-
-Po nastavení secretů otevři `https://<tvoje-domena>/api/debug?account=<id>` v prohlížeči (musíš být přihlášený přes Access). Hledej:
-- `accountsVisibleToToken` — musí obsahovat účet s `id == accountIdInSecret`
-- `zonesInConfiguredAccount` — seznam zón (ne prázdný)
-- `graphqlTest.response.data` — nesmí být `null` a nesmí být přítomné `errors`
-
-Pokud `graphqlTest` vrací `"zone ... does not have access to the path"`, token nemá zone-level Analytics:Read — vrať se k bodu 3 a vytvoř token znovu se scope **All Domains**.
 
 ## Setup
 
@@ -179,7 +169,6 @@ Bez toho Wrangler při každém deployi default domény znovu zapne, což by obe
 - Frontend nikdy nedostane token — `GET /api/accounts` vrací jen `id` + `label`
 - Worker musí být za Cloudflare Access — bez něj je dashboard veřejný
 - `.dev.vars` je v [.gitignore](.gitignore)
-- `/api/debug` vrací accountId v plaintextu — pokud je to citlivé, smaž endpoint po dokončení diagnostiky
 
 ## Možná rozšíření
 
