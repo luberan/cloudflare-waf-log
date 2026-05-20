@@ -195,7 +195,7 @@ async function listZones(acc: Account): Promise<Response> {
   });
 }
 
-async function getEvents(acc: Account, f: Filters): Promise<Response> {
+async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any[]> {
   const query = /* GraphQL */ `
     query Events(
       $zoneTag: String!
@@ -236,90 +236,62 @@ async function getEvents(acc: Account, f: Filters): Promise<Response> {
   if (f.clientRequestHTTPHost?.length) filter.clientRequestHTTPHost_in = f.clientRequestHTTPHost;
   if (f.source?.length) filter.source_in = f.source;
 
-  type Resp = { viewer: { zones: { firewallEventsAdaptive: unknown[] }[] } };
-  const data = await gql<Resp>(acc, query, {
-    zoneTag: f.zoneTag,
-    limit: f.limit ?? 200,
-    filter,
-  });
-  return json({ events: data.viewer.zones[0]?.firewallEventsAdaptive ?? [] });
+  type Resp = { viewer: { zones: { firewallEventsAdaptive: any[] }[] } };
+  const data = await gql<Resp>(acc, query, { zoneTag: f.zoneTag, limit, filter });
+  return data.viewer.zones[0]?.firewallEventsAdaptive ?? [];
+}
+
+async function getEvents(acc: Account, f: Filters): Promise<Response> {
+  const events = await fetchEvents(acc, f, f.limit ?? 200);
+  return json({ events });
 }
 
 async function getSummary(acc: Account, f: Filters): Promise<Response> {
-  const baseFilter: Record<string, unknown> = {
-    datetime_geq: f.datetimeGeq,
-    datetime_leq: f.datetimeLeq,
-  };
-  if (f.action?.length) baseFilter.action_in = f.action;
-  if (f.clientCountryName?.length) baseFilter.clientCountryName_in = f.clientCountryName;
-  if (f.clientRequestHTTPHost?.length) baseFilter.clientRequestHTTPHost_in = f.clientRequestHTTPHost;
-  if (f.source?.length) baseFilter.source_in = f.source;
+  // Pozn.: na Free tieru NENÍ dostupný firewallEventsAdaptiveGroups (vyžaduje Pro+).
+  // Stažneme tedy raw eventy (limit 10000 = HW limit) a agregujeme tady v Workeru.
+  const events = await fetchEvents(acc, f, 10000);
 
-  const groupQuery = (dim: string) => /* GraphQL */ `
-    query G($zoneTag: String!, $filter: ZoneFirewallEventsAdaptiveGroupsFilter_InputObject) {
-      viewer {
-        zones(filter: { zoneTag: $zoneTag }) {
-          firewallEventsAdaptiveGroups(
-            filter: $filter
-            limit: 50
-            orderBy: [count_DESC]
-          ) {
-            count
-            dimensions { ${dim} }
-          }
-        }
-      }
+  const counter = (key: (e: any) => string | undefined) => {
+    const m = new Map<string, number>();
+    for (const e of events) {
+      const k = key(e) ?? "(unknown)";
+      m.set(k, (m.get(k) ?? 0) + 1);
     }
-  `;
-
-  type GroupResp = {
-    viewer: {
-      zones: { firewallEventsAdaptiveGroups: { count: number; dimensions: Record<string, string> }[] }[];
-    };
+    return [...m.entries()]
+      .map(([key, count]) => ({ key, count }))
+      .sort((a, b) => b.count - a.count);
   };
 
-  async function group(dim: string) {
-    const data = await gql<GroupResp>(acc, groupQuery(dim), { zoneTag: f.zoneTag, filter: baseFilter });
-    return (data.viewer.zones[0]?.firewallEventsAdaptiveGroups ?? []).map((g) => ({
-      key: g.dimensions[dim] ?? "(unknown)",
-      count: g.count,
-    }));
+  const byAction = counter((e) => e.action);
+  const byCountry = counter((e) => e.clientCountryName).slice(0, 50);
+  const byHost = counter((e) => e.clientRequestHTTPHost).slice(0, 50);
+  const bySource = counter((e) => e.source);
+  const byRule = counter((e) => e.ruleId).slice(0, 50);
+
+  // Time series po hodinách, per akce
+  const seriesMap = new Map<string, number>(); // klic: "hour|action"
+  for (const e of events) {
+    const hour = (e.datetime as string).slice(0, 13) + ":00:00Z";
+    const k = `${hour}|${e.action}`;
+    seriesMap.set(k, (seriesMap.get(k) ?? 0) + 1);
   }
+  const series = [...seriesMap.entries()].map(([k, count]) => {
+    const [hour, action] = k.split("|");
+    return { hour, action, count };
+  });
+  series.sort((a, b) => a.hour.localeCompare(b.hour));
 
-  const seriesQuery = /* GraphQL */ `
-    query S($zoneTag: String!, $filter: ZoneFirewallEventsAdaptiveGroupsFilter_InputObject) {
-      viewer {
-        zones(filter: { zoneTag: $zoneTag }) {
-          firewallEventsAdaptiveGroups(
-            filter: $filter
-            limit: 500
-            orderBy: [datetimeHour_ASC]
-          ) {
-            count
-            dimensions { datetimeHour action }
-          }
-        }
-      }
-    }
-  `;
-  const seriesP = gql<GroupResp>(acc, seriesQuery, { zoneTag: f.zoneTag, filter: baseFilter }).then((d) =>
-    (d.viewer.zones[0]?.firewallEventsAdaptiveGroups ?? []).map((g) => ({
-      hour: g.dimensions.datetimeHour,
-      action: g.dimensions.action,
-      count: g.count,
-    })),
-  );
-
-  const [byAction, byCountry, byHost, bySource, byRule, series] = await Promise.all([
-    group("action"),
-    group("clientCountryName"),
-    group("clientRequestHTTPHost"),
-    group("source"),
-    group("ruleId"),
-    seriesP,
-  ]);
-
-  return json({ byAction, byCountry, byHost, bySource, byRule, series });
+  return json({
+    byAction,
+    byCountry,
+    byHost,
+    bySource,
+    byRule,
+    series,
+    events: events.slice(0, 500),
+    totalSampled: events.length,
+    truncated: events.length >= 10000,
+  });
 }
 
 async function debug(acc: Account): Promise<Response> {
