@@ -76,10 +76,17 @@
   <label>Host:
     <input id="hostFilter" type="text" placeholder="napr. www.example.com" size="22" />
   </label>
+  <label>Cesta:
+    <input id="pathFilter" type="text" placeholder="napr. /wp-login.php" size="22" />
+  </label>
+  <label>Rule ID:
+    <input id="ruleFilter" type="text" placeholder="napr. uuid,uuid" size="22" />
+  </label>
   <label>Země:
     <input id="countryFilter" type="text" placeholder="napr. CZ,DE" size="10" />
   </label>
   <span class="grow"></span>
+  <button id="clearFilters">Vyčistit filtry</button>
   <button id="refresh" class="primary">Načíst</button>
 </header>
 
@@ -98,7 +105,9 @@
   <section class="panel col-6"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
 
   <section class="panel col-6"><h2>Zdroj (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource"></canvas></div></section>
-  <section class="panel col-6"><h2>Top rule IDs</h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6"><h2>Top rule IDs <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+
+  <section class="panel col-12"><h2>Top cesty <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblPaths"><thead><tr><th>Cesta</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
 
   <section class="panel col-12"><h2>Eventy <span class="muted" id="eventsCount"></span></h2>
     <div class="scroll"><table id="tblEvents"><thead><tr>
@@ -131,6 +140,8 @@ function buildQuery() {
   p.set('until', until.toISOString());
   if (state.actions.size) p.set('action', [...state.actions].join(','));
   const host = $('#hostFilter').value.trim(); if (host) p.set('host', host);
+  const path = $('#pathFilter').value.trim(); if (path) p.set('path', path);
+  const rule = $('#ruleFilter').value.trim(); if (rule) p.set('rule', rule);
   const country = $('#countryFilter').value.trim(); if (country) p.set('country', country.toUpperCase());
   return p.toString();
 }
@@ -182,7 +193,21 @@ function timeSeries(canvasId, series) {
 function renderRulesTable(rows) {
   const tbody = $('#tblRules tbody');
   tbody.innerHTML = rows.slice(0, 30).map(r =>
-    `<tr><td>${escapeHtml(r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+    `<tr data-rule="${escapeHtml(r.key)}" style="cursor:pointer"><td>${escapeHtml(r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
+    $('#ruleFilter').value = tr.dataset.rule;
+    load();
+  }));
+}
+
+function renderPathsTable(rows) {
+  const tbody = $('#tblPaths tbody');
+  tbody.innerHTML = rows.slice(0, 50).map(r =>
+    `<tr data-path="${escapeHtml(r.key)}" style="cursor:pointer"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 100 ? r.key.slice(0,100)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
+    $('#pathFilter').value = tr.dataset.path;
+    load();
+  }));
 }
 
 function renderEvents(events) {
@@ -242,6 +267,7 @@ async function load() {
     barChart('chartHost', summary.byHost.slice(0,15).map(r=>r.key||'?'), summary.byHost.slice(0,15).map(r=>r.count));
     doughnut('chartSource', summary.bySource.map(r=>r.key), summary.bySource.map(r=>r.count), PALETTE);
     renderRulesTable(summary.byRule);
+    renderPathsTable(summary.byPath || []);
     renderEvents(events.events);
   } catch (e) {
     showError(e.message);
@@ -261,6 +287,12 @@ async function init() {
       });
     });
     $('#refresh').addEventListener('click', load);
+    $('#clearFilters').addEventListener('click', () => {
+      state.actions.clear();
+      document.querySelectorAll('#actionChips .chip.active').forEach(c => c.classList.remove('active'));
+      ['hostFilter','pathFilter','ruleFilter','countryFilter'].forEach(id => $('#'+id).value = '');
+      load();
+    });
     $('#account').addEventListener('change', loadZones);
     $('#zone').addEventListener('change', load);
     $('#range').addEventListener('change', load);

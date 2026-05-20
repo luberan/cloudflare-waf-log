@@ -50,6 +50,8 @@ type Filters = {
   action?: string[];
   clientCountryName?: string[];
   clientRequestHTTPHost?: string[];
+  clientRequestPath?: string[];
+  ruleId?: string[];
   source?: string[];
   limit?: number;
 };
@@ -132,6 +134,8 @@ function parseFilters(url: URL): Filters {
     action: multi("action"),
     clientCountryName: multi("country"),
     clientRequestHTTPHost: multi("host"),
+    clientRequestPath: multi("path"),
+    ruleId: multi("rule"),
     source: multi("source"),
     limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 1000) : 200,
   };
@@ -234,6 +238,8 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
   if (f.action?.length) filter.action_in = f.action;
   if (f.clientCountryName?.length) filter.clientCountryName_in = f.clientCountryName;
   if (f.clientRequestHTTPHost?.length) filter.clientRequestHTTPHost_in = f.clientRequestHTTPHost;
+  if (f.clientRequestPath?.length) filter.clientRequestPath_in = f.clientRequestPath;
+  if (f.ruleId?.length) filter.ruleId_in = f.ruleId;
   if (f.source?.length) filter.source_in = f.source;
 
   type Resp = { viewer: { zones: { firewallEventsAdaptive: any[] }[] } };
@@ -265,6 +271,7 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   const byAction = counter((e) => e.action);
   const byCountry = counter((e) => e.clientCountryName).slice(0, 50);
   const byHost = counter((e) => e.clientRequestHTTPHost).slice(0, 50);
+  const byPath = counter((e) => e.clientRequestPath).slice(0, 50);
   const bySource = counter((e) => e.source);
   const byRule = counter((e) => e.ruleId).slice(0, 50);
 
@@ -285,6 +292,7 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
     byAction,
     byCountry,
     byHost,
+    byPath,
     bySource,
     byRule,
     series,
