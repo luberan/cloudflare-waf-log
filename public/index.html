@@ -222,13 +222,15 @@ function barChart(canvasId, labels, values, colors, onPick) {
       maintainAspectRatio: false,
       onClick: onPick ? (evt, els, chart) => {
         if (els.length) { onPick(chart.data.labels[els[0].index]); return; }
-        // Klik mimo bar – zkontroluj jestli to bylo na tick label (vlevo od chart area u horizontal baru)
-        const { x, y } = evt;
+        // Klik mimo bar – zkontroluj jestli to bylo na tick label vlevo od chart area
         const area = chart.chartArea;
-        if (x < area.left && y >= area.top && y <= area.bottom) {
-          const idx = Math.round(chart.scales.y.getValueForPixel(y));
-          if (idx >= 0 && idx < chart.data.labels.length) onPick(chart.data.labels[idx]);
-        }
+        const lbls = chart.data.labels;
+        if (!lbls || !lbls.length) return;
+        if (evt.x >= area.left) return;
+        if (evt.y < area.top || evt.y > area.bottom) return;
+        const slot = (area.bottom - area.top) / lbls.length;
+        const idx = Math.floor((evt.y - area.top) / slot);
+        if (idx >= 0 && idx < lbls.length) onPick(lbls[idx]);
       } : undefined,
       onHover: onPick ? (evt, els, chart) => {
         const native = evt.native; if (!native) return;
