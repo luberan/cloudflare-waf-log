@@ -212,7 +212,7 @@ function destroyChart(key) { if (state.charts[key]) { state.charts[key].destroy(
 
 function barChart(canvasId, labels, values, colors, onPick) {
   destroyChart(canvasId);
-  state.charts[canvasId] = new Chart($('#'+canvasId), {
+  const chart = new Chart($('#'+canvasId), {
     type: 'bar',
     data: { labels, datasets: [{ data: values, backgroundColor: colors || PALETTE, borderWidth: 0 }] },
     options: {
@@ -220,29 +220,43 @@ function barChart(canvasId, labels, values, colors, onPick) {
       plugins: { legend: { display: false } },
       scales: { x: { ticks: { color: '#8a93a6' } }, y: { ticks: { color: '#e6e8ee' } } },
       maintainAspectRatio: false,
-      onClick: onPick ? (evt, els, chart) => {
-        if (els.length) { onPick(chart.data.labels[els[0].index]); return; }
-        // Klik mimo bar – zkontroluj jestli to bylo na tick label vlevo od chart area
-        const area = chart.chartArea;
-        const lbls = chart.data.labels;
-        if (!lbls || !lbls.length) return;
-        if (evt.x >= area.left) return;
-        if (evt.y < area.top || evt.y > area.bottom) return;
-        const slot = (area.bottom - area.top) / lbls.length;
-        const idx = Math.floor((evt.y - area.top) / slot);
-        if (idx >= 0 && idx < lbls.length) onPick(lbls[idx]);
+      onClick: onPick ? (_evt, els) => {
+        if (els.length) onPick(chart.data.labels[els[0].index]);
       } : undefined,
-      onHover: onPick ? (evt, els, chart) => {
+      onHover: onPick ? (evt, els) => {
         const native = evt.native; if (!native) return;
+        const canvas = native.target;
         let cursor = els.length ? 'pointer' : '';
         if (!els.length) {
           const area = chart.chartArea;
-          if (evt.x < area.left && evt.y >= area.top && evt.y <= area.bottom) cursor = 'pointer';
+          const rect = canvas.getBoundingClientRect();
+          const x = native.clientX - rect.left;
+          const y = native.clientY - rect.top;
+          if (x < area.left && y >= area.top && y <= area.bottom) cursor = 'pointer';
         }
-        native.target.style.cursor = cursor;
+        canvas.style.cursor = cursor;
       } : undefined,
     }
   });
+  state.charts[canvasId] = chart;
+  if (onPick) {
+    // Nativní listener na klik do oblasti tick labelů (Chart.js onClick je tu nespolehlivý)
+    const canvas = chart.canvas;
+    const handler = (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const area = chart.chartArea;
+      const lbls = chart.data.labels;
+      if (!lbls || !lbls.length) return;
+      if (x >= area.left) return; // klik do chart area řeší Chart.js onClick
+      if (y < area.top || y > area.bottom) return;
+      const slot = (area.bottom - area.top) / lbls.length;
+      const idx = Math.floor((y - area.top) / slot);
+      if (idx >= 0 && idx < lbls.length) onPick(lbls[idx]);
+    };
+    canvas.addEventListener('click', handler);
+  }
 }
 
 function doughnut(canvasId, labels, values, colors) {
