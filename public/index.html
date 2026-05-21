@@ -288,9 +288,34 @@ async function init() {
       });
     });
     $('#refresh').addEventListener('click', load);
-    $('#exportCsv').addEventListener('click', () => {
+    $('#exportCsv').addEventListener('click', async () => {
       if (!$('#zone').value) return;
-      window.location.href = '/api/export.csv?' + buildQuery();
+      const btn = $('#exportCsv');
+      btn.disabled = true;
+      showError('');
+      try {
+        const r = await fetch('/api/export.csv?' + buildQuery());
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error(t || r.statusText);
+        }
+        const blob = await r.blob();
+        const cd = r.headers.get('content-disposition') || '';
+        const m = cd.match(/filename="?([^"]+)"?/i);
+        const filename = m ? m[1] : 'waf-export.csv';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) {
+        showError('Export selhal: ' + e.message);
+      } finally {
+        btn.disabled = false;
+      }
     });
     $('#clearFilters').addEventListener('click', () => {
       state.actions.clear();
