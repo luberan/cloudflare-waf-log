@@ -85,6 +85,12 @@
   <label>Země:
     <input id="countryFilter" type="text" placeholder="napr. CZ,DE" size="10" />
   </label>
+  <label>ASN:
+    <input id="asnFilter" type="text" placeholder="napr. 13335,15169" size="14" />
+  </label>
+  <label>User-Agent:
+    <input id="uaFilter" type="text" placeholder="přesná shoda UA" size="22" />
+  </label>
   <span class="grow"></span>
   <button id="clearFilters">Vyčistit filtry</button>
   <button id="exportCsv" title="Export raw eventů s aktuálními filtry (max 10 000 řádků)">Export CSV</button>
@@ -110,9 +116,12 @@
 
   <section class="panel col-12"><h2>Top cesty <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblPaths"><thead><tr><th>Cesta</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
 
+  <section class="panel col-6"><h2>Top ASN <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblAsn"><thead><tr><th>ASN</th><th>Popis</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6"><h2>Top User-Agents <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblUa"><thead><tr><th>User-Agent</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+
   <section class="panel col-12"><h2>Eventy <span class="muted" id="eventsCount"></span></h2>
     <div class="scroll"><table id="tblEvents"><thead><tr>
-      <th>Čas</th><th>Akce</th><th>Zdroj</th><th>Země</th><th>IP</th><th>Host</th><th>Cesta</th><th>Metoda</th><th>Rule</th><th>Ray</th>
+      <th>Čas</th><th>Akce</th><th>Zdroj</th><th>Země</th><th>IP</th><th>ASN</th><th>Host</th><th>Cesta</th><th>Metoda</th><th>Rule</th><th>Ray</th>
     </tr></thead><tbody></tbody></table></div>
   </section>
 </main>
@@ -144,6 +153,8 @@ function buildQuery() {
   const path = $('#pathFilter').value.trim(); if (path) p.set('path', path);
   const rule = $('#ruleFilter').value.trim(); if (rule) p.set('rule', rule);
   const country = $('#countryFilter').value.trim(); if (country) p.set('country', country.toUpperCase());
+  const asn = $('#asnFilter').value.trim(); if (asn) p.set('asn', asn);
+  const ua = $('#uaFilter').value.trim(); if (ua) p.set('ua', ua);
   return p.toString();
 }
 
@@ -211,6 +222,26 @@ function renderPathsTable(rows) {
   }));
 }
 
+function renderAsnTable(rows) {
+  const tbody = $('#tblAsn tbody');
+  tbody.innerHTML = rows.slice(0, 50).map(r =>
+    `<tr data-asn="${escapeHtml(r.key)}" style="cursor:pointer"><td>AS${escapeHtml(r.key)}</td><td title="${escapeHtml(r.label||'')}">${escapeHtml((r.label||'').slice(0,60))}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
+    $('#asnFilter').value = tr.dataset.asn;
+    load();
+  }));
+}
+
+function renderUaTable(rows) {
+  const tbody = $('#tblUa tbody');
+  tbody.innerHTML = rows.slice(0, 50).map(r =>
+    `<tr data-ua="${escapeHtml(r.key)}" style="cursor:pointer"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 120 ? r.key.slice(0,120)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
+    $('#uaFilter').value = tr.dataset.ua;
+    load();
+  }));
+}
+
 function renderEvents(events) {
   $('#eventsCount').textContent = `(${events.length})`;
   const tbody = $('#tblEvents tbody');
@@ -221,6 +252,7 @@ function renderEvents(events) {
       <td>${escapeHtml(e.source||'')}</td>
       <td>${escapeHtml(e.clientCountryName||'')}</td>
       <td>${escapeHtml(e.clientIP||'')}</td>
+      <td title="${escapeHtml(e.clientASNDescription||'')}">${e.clientAsn ? 'AS'+e.clientAsn : ''}</td>
       <td>${escapeHtml(e.clientRequestHTTPHost||'')}</td>
       <td title="${escapeHtml(e.clientRequestPath||'')}">${escapeHtml((e.clientRequestPath||'').slice(0,60))}</td>
       <td>${escapeHtml(e.clientRequestHTTPMethodName||'')}</td>
@@ -269,6 +301,8 @@ async function load() {
     doughnut('chartSource', summary.bySource.map(r=>r.key), summary.bySource.map(r=>r.count), PALETTE);
     renderRulesTable(summary.byRule);
     renderPathsTable(summary.byPath || []);
+    renderAsnTable(summary.byAsn || []);
+    renderUaTable(summary.byUserAgent || []);
     renderEvents(events.events);
   } catch (e) {
     showError(e.message);
@@ -320,7 +354,7 @@ async function init() {
     $('#clearFilters').addEventListener('click', () => {
       state.actions.clear();
       document.querySelectorAll('#actionChips .chip.active').forEach(c => c.classList.remove('active'));
-      ['hostFilter','pathFilter','ruleFilter','countryFilter'].forEach(id => $('#'+id).value = '');
+      ['hostFilter','pathFilter','ruleFilter','countryFilter','asnFilter','uaFilter'].forEach(id => $('#'+id).value = '');
       load();
     });
     $('#account').addEventListener('change', loadZones);

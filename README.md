@@ -13,6 +13,8 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
   - **cesty** (např. `/wp-login.php`)
   - **Rule ID** (UUID firewall pravidla, comma-separated)
   - **země** (ISO2 kódy: `CZ,DE,RU,...`)
+  - **ASN** (Čísla AS, comma-separated: `13335,15169`)
+  - **User-Agent** (přesná shoda)
 - Časový rozsah: posledních **1 / 6 / 24 h** (Free tier — víc retence Cloudflare neukládá)
 - **KPI karty**: celkem / blokované / challenge / allow+log
 - **Grafy**:
@@ -24,7 +26,9 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
 - **Tabulky**:
   - Top 30 Rule IDs *(klik = filtr na Rule ID)*
   - Top 50 cest *(klik = filtr na Cestu)*
-  - Posledních ~500 eventů (čas, akce, IP, země, host, cesta, metoda, rule, ray ID)
+  - Top 50 ASN *(klik = filtr na ASN)*
+  - Top 50 User-Agents *(klik = filtr na UA)*
+  - Posledních ~500 eventů (čas, akce, IP, ASN, země, host, cesta, metoda, rule, ray ID)
 - **Vyčistit filtry** — jedním tlačítkem zruší všechny chipy a inputy
 - **Export CSV** — stažení raw eventů s aktuálně nastavenými filtry (až 10 000 řádků, UTF-8 + BOM, otevře se rovnou v Excelu)
 
@@ -177,4 +181,3 @@ Bez toho Wrangler při každém deployi default domény znovu zapne, což by obe
 - Cache odpovědí GraphQL v KV / Cache API
 - Cron Trigger → ukládat agregace do D1/R2 pro historii delší než 24 h
 - Alerting webhook (Slack/Discord) při překročení prahu blokovaných requestů
-- Drill-down podle ASN / User-Agent

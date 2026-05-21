@@ -54,6 +54,8 @@ type Filters = {
   clientRequestPath?: string[];
   ruleId?: string[];
   source?: string[];
+  clientAsn?: number[];
+  userAgent?: string[];
   limit?: number;
 };
 
@@ -126,6 +128,13 @@ function parseFilters(url: URL): Filters {
     return v.length ? v : undefined;
   };
 
+  const multiInt = (name: string) => {
+    const v = multi(name)
+      ?.map((s) => Number(s.replace(/^AS/i, "")))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    return v && v.length ? v : undefined;
+  };
+
   const limit = Number(url.searchParams.get("limit") ?? "200");
 
   return {
@@ -138,6 +147,8 @@ function parseFilters(url: URL): Filters {
     clientRequestPath: multi("path"),
     ruleId: multi("rule"),
     source: multi("source"),
+    clientAsn: multiInt("asn"),
+    userAgent: multi("ua"),
     limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 1000) : 200,
   };
 }
@@ -218,6 +229,7 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
             action
             source
             clientIP
+            clientAsn
             clientCountryName
             clientASNDescription
             clientRequestHTTPHost
@@ -242,6 +254,8 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
   if (f.clientRequestPath?.length) filter.clientRequestPath_in = f.clientRequestPath;
   if (f.ruleId?.length) filter.ruleId_in = f.ruleId;
   if (f.source?.length) filter.source_in = f.source;
+  if (f.clientAsn?.length) filter.clientAsn_in = f.clientAsn;
+  if (f.userAgent?.length) filter.userAgent_in = f.userAgent;
 
   type Resp = { viewer: { zones: { firewallEventsAdaptive: any[] }[] } };
   const data = await gql<Resp>(acc, query, { zoneTag: f.zoneTag, limit, filter });
@@ -258,6 +272,7 @@ const CSV_COLUMNS: { header: string; key: string }[] = [
   { header: "action", key: "action" },
   { header: "source", key: "source" },
   { header: "clientIP", key: "clientIP" },
+  { header: "clientAsn", key: "clientAsn" },
   { header: "clientCountryName", key: "clientCountryName" },
   { header: "clientASNDescription", key: "clientASNDescription" },
   { header: "clientRequestHTTPHost", key: "clientRequestHTTPHost" },
@@ -320,6 +335,22 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   const bySource = counter((e) => e.source);
   const byRule = counter((e) => e.ruleId).slice(0, 50);
 
+  // ASN aggregation — group by numeric ASN, keep description as label.
+  const asnMap = new Map<string, { count: number; label: string }>();
+  for (const e of events) {
+    const asn = e.clientAsn ?? 0;
+    const k = String(asn);
+    const cur = asnMap.get(k);
+    if (cur) cur.count++;
+    else asnMap.set(k, { count: 1, label: e.clientASNDescription || "(unknown)" });
+  }
+  const byAsn = [...asnMap.entries()]
+    .map(([asn, { count, label }]) => ({ key: asn, label, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 50);
+
+  const byUserAgent = counter((e) => e.userAgent).slice(0, 50);
+
   // Time series po hodinách, per akce
   const seriesMap = new Map<string, number>(); // klic: "hour|action"
   for (const e of events) {
@@ -340,6 +371,8 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
     byPath,
     bySource,
     byRule,
+    byAsn,
+    byUserAgent,
     series,
     events: events.slice(0, 500),
     totalSampled: events.length,
