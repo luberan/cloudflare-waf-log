@@ -6,6 +6,7 @@
  *   GET /api/zones?account=<id>                    → seznam zón daného účtu
  *   GET /api/log?account=<id>&zone=<id>&...        → individuální eventy (firewallEventsAdaptive)
  *   GET /api/stats?account=<id>&zone=<id>&...      → agregace (firewallEventsAdaptiveGroups)
+ *   GET /api/export.csv?account=<id>&zone=<id>&... → CSV export raw eventů (až 10 000 řádků)
  *
  * Konfigurace (vše jako Worker secrets — nic v repu):
  *   Pro každý CF účet vytvoř TŘI secrety:
@@ -252,6 +253,50 @@ async function getEvents(acc: Account, f: Filters): Promise<Response> {
   return json({ events });
 }
 
+const CSV_COLUMNS: { header: string; key: string }[] = [
+  { header: "datetime", key: "datetime" },
+  { header: "action", key: "action" },
+  { header: "source", key: "source" },
+  { header: "clientIP", key: "clientIP" },
+  { header: "clientCountryName", key: "clientCountryName" },
+  { header: "clientASNDescription", key: "clientASNDescription" },
+  { header: "clientRequestHTTPHost", key: "clientRequestHTTPHost" },
+  { header: "clientRequestPath", key: "clientRequestPath" },
+  { header: "clientRequestHTTPMethodName", key: "clientRequestHTTPMethodName" },
+  { header: "userAgent", key: "userAgent" },
+  { header: "ruleId", key: "ruleId" },
+  { header: "rayName", key: "rayName" },
+];
+
+function csvEscape(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  const s = String(v);
+  // Prefix formula-trigger chars to prevent CSV injection in Excel/Sheets.
+  const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+async function exportCsv(acc: Account, f: Filters): Promise<Response> {
+  const events = await fetchEvents(acc, f, 10000);
+  const lines = [CSV_COLUMNS.map((c) => c.header).join(",")];
+  for (const e of events) {
+    lines.push(CSV_COLUMNS.map((c) => csvEscape((e as Record<string, unknown>)[c.key])).join(","));
+  }
+  // UTF-8 BOM so Excel opens it with correct encoding.
+  const body = "\uFEFF" + lines.join("\r\n") + "\r\n";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const filename = `waf-${acc.id}-${f.zoneTag.slice(0, 8)}-${stamp}.csv`;
+  return new Response(body, {
+    headers: {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="${filename}"`,
+      "cache-control": "no-store",
+      "x-event-count": String(events.length),
+      "x-truncated": events.length >= 10000 ? "1" : "0",
+    },
+  });
+}
+
 async function getSummary(acc: Account, f: Filters): Promise<Response> {
   // Pozn.: na Free tieru NENÍ dostupný firewallEventsAdaptiveGroups (vyžaduje Pro+).
   // Stažneme tedy raw eventy (limit 10000 = HW limit) a agregujeme tady v Workeru.
@@ -320,6 +365,7 @@ export default {
       if (url.pathname === "/api/zones") return await listZones(account);
       if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
       if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
+      if (url.pathname === "/api/export.csv") return await exportCsv(account, parseFilters(url));
 
       return err(404, "not found");
     } catch (e) {

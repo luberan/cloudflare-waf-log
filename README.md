@@ -26,6 +26,7 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
   - Top 50 cest *(klik = filtr na Cestu)*
   - Posledních ~500 eventů (čas, akce, IP, země, host, cesta, metoda, rule, ray ID)
 - **Vyčistit filtry** — jedním tlačítkem zruší všechny chipy a inputy
+- **Export CSV** — stažení raw eventů s aktuálně nastavenými filtry (až 10 000 řádků, UTF-8 + BOM, otevře se rovnou v Excelu)
 
 ## Architektura
 
@@ -43,6 +44,7 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
 | `GET /api/zones?account=<id>` | Seznam zón daného účtu |
 | `GET /api/stats?account=<id>&zone=<id>&...filters` | Agregace + posledních 500 eventů (vše v jednom requestu) |
 | `GET /api/log?account=<id>&zone=<id>&...filters` | Jen eventy (limit ovládatelný přes `&limit=`) |
+| `GET /api/export.csv?account=<id>&zone=<id>&...filters` | CSV export raw eventů (až 10 000 řádků, `Content-Disposition: attachment`) |
 
 ### Pozn. k Free tieru — agregace v Workeru
 
@@ -173,7 +175,6 @@ Bez toho Wrangler při každém deployi default domény znovu zapne, což by obe
 ## Možná rozšíření
 
 - Cache odpovědí GraphQL v KV / Cache API
-- Export do CSV
 - Cron Trigger → ukládat agregace do D1/R2 pro historii delší než 24 h
 - Alerting webhook (Slack/Discord) při překročení prahu blokovaných requestů
 - Drill-down podle ASN / User-Agent
