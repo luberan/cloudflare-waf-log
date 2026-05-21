@@ -499,8 +499,8 @@ export default {
 
       return err(404, "not found");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return err(400, msg);
+      console.error("Unhandled API error:", e);
+      return err(500, "internal server error");
     }
   },
 } satisfies ExportedHandler<Env>;
