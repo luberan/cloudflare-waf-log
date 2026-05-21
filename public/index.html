@@ -108,8 +108,8 @@
   <section class="panel col-8"><h2>Eventy v čase (po hodině)</h2><div class="chart-wrap tall"><canvas id="chartSeries"></canvas></div></section>
   <section class="panel col-4"><h2>Podle akce</h2><div class="chart-wrap"><canvas id="chartAction"></canvas></div></section>
 
-  <section class="panel col-6"><h2>Top země</h2><div class="chart-wrap"><canvas id="chartCountry"></canvas></div></section>
-  <section class="panel col-6"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
+  <section class="panel col-6"><h2>Top země <span class="muted">(klik = filtr)</span></h2><div class="chart-wrap"><canvas id="chartCountry"></canvas></div></section>
+  <section class="panel col-6"><h2>Top hostnames <span class="muted">(klik = filtr)</span></h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
 
   <section class="panel col-6"><h2>Zdroj (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource"></canvas></div></section>
   <section class="panel col-6"><h2>Top rule IDs <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
@@ -162,12 +162,23 @@ function showError(msg) { const e = $('#error'); if (msg) { e.textContent = msg;
 
 function destroyChart(key) { if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; } }
 
-function barChart(canvasId, labels, values, colors) {
+function barChart(canvasId, labels, values, colors, onPick) {
   destroyChart(canvasId);
   state.charts[canvasId] = new Chart($('#'+canvasId), {
     type: 'bar',
     data: { labels, datasets: [{ data: values, backgroundColor: colors || PALETTE, borderWidth: 0 }] },
-    options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8a93a6' } }, y: { ticks: { color: '#e6e8ee' } } }, maintainAspectRatio: false }
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: '#8a93a6' } }, y: { ticks: { color: '#e6e8ee' } } },
+      maintainAspectRatio: false,
+      onClick: onPick ? (_evt, els, chart) => {
+        if (!els.length) return;
+        const label = chart.data.labels[els[0].index];
+        onPick(label);
+      } : undefined,
+      onHover: onPick ? (evt, els) => { evt.native.target.style.cursor = els.length ? 'pointer' : ''; } : undefined,
+    }
   });
 }
 
@@ -296,8 +307,16 @@ async function load() {
     timeSeries('chartSeries', summary.series);
     doughnut('chartAction', summary.byAction.map(r=>r.key), summary.byAction.map(r=>r.count),
       summary.byAction.map(r => ACTION_COLOR[r.key] || '#888'));
-    barChart('chartCountry', summary.byCountry.slice(0,15).map(r=>r.key||'?'), summary.byCountry.slice(0,15).map(r=>r.count));
-    barChart('chartHost', summary.byHost.slice(0,15).map(r=>r.key||'?'), summary.byHost.slice(0,15).map(r=>r.count));
+    barChart('chartCountry', summary.byCountry.slice(0,15).map(r=>r.key||'?'), summary.byCountry.slice(0,15).map(r=>r.count), null, (label) => {
+      if (!label || label === '?') return;
+      $('#countryFilter').value = label;
+      load();
+    });
+    barChart('chartHost', summary.byHost.slice(0,15).map(r=>r.key||'?'), summary.byHost.slice(0,15).map(r=>r.count), null, (label) => {
+      if (!label || label === '?') return;
+      $('#hostFilter').value = label;
+      load();
+    });
     doughnut('chartSource', summary.bySource.map(r=>r.key), summary.bySource.map(r=>r.count), PALETTE);
     renderRulesTable(summary.byRule);
     renderPathsTable(summary.byPath || []);
