@@ -1,110 +1,110 @@
 # Cloudflare WAF Dashboard
 
-Cloudflare Worker, který vizualizuje WAF / Security events napříč **více Cloudflare účty** (vlastní + zákaznické).
-Plně funkční na **Free tieru** (retence WAF eventů 24 h).
+A Cloudflare Worker that visualises WAF / Security events across **multiple Cloudflare accounts** (your own + customer accounts).
+Fully functional on the **Free tier** (24 h WAF event retention).
 
-## Co umí
+## Features
 
-- **Přepínání mezi Cloudflare účty** — každý účet má svůj API token uložený jako Worker secret
-- **Přepínání mezi zónami** v rámci zvoleného účtu
-- Filtrování podle:
-  - **akce** (chipy: `block`, `managed_challenge`, `jschallenge`, `challenge`, `allow`, `log`, `skip`)
-  - **hostname** (např. `www.example.com`)
-  - **cesty** (např. `/wp-login.php`)
-  - **Rule ID** (UUID firewall pravidla, comma-separated)
-  - **země** (ISO2 kódy: `CZ,DE,RU,...`)
-  - **ASN** (Čísla AS, comma-separated: `13335,15169`)
-  - **User-Agent** (přesná shoda)
-- Časový rozsah: posledních **1 / 6 / 24 h** (Free tier — víc retence Cloudflare neukládá)
-- **KPI karty**: celkem / blokované / challenge / allow+log
-- **Grafy**:
-  - Stacked time series (eventy po hodině, barevně rozdělené dle akce)
-  - Doughnut podle akce
-  - Top 15 zemí (horizontal bar)
+- **Switching between Cloudflare accounts** — each account has its own API token stored as a Worker secret
+- **Switching between zones** within the selected account
+- Filtering by:
+  - **action** (chips: `block`, `managed_challenge`, `jschallenge`, `challenge`, `allow`, `log`, `skip`)
+  - **hostname** (e.g. `www.example.com`)
+  - **path** (e.g. `/wp-login.php`)
+  - **Rule ID** (firewall rule UUID, comma-separated)
+  - **country** (ISO2 codes: `US,DE,RU,...`)
+  - **ASN** (AS numbers, comma-separated: `13335,15169`)
+  - **User-Agent** (exact match)
+- Time range: last **1 / 6 / 24 h** (Free tier — Cloudflare does not retain more than that)
+- **KPI cards**: total / blocked / challenge / allow+log
+- **Charts**:
+  - Stacked time series (events per hour, colour-coded by action)
+  - Doughnut by action
+  - Top 15 countries (horizontal bar)
   - Top 15 hostnames
-  - Doughnut podle zdroje (`waf`, `firewallrules`, `botManagement`, …)
-- **Tabulky**:
-  - Top 30 Rule IDs *(klik = filtr na Rule ID)*
-  - Top 50 cest *(klik = filtr na Cestu)*
-  - Top 50 ASN *(klik = filtr na ASN)*
-  - Top 50 User-Agents *(klik = filtr na UA)*
-  - Posledních ~500 eventů (čas, akce, IP, ASN, země, host, cesta, metoda, rule, ray ID)
-- **Vyčistit filtry** — jedním tlačítkem zruší všechny chipy a inputy
-- **Export CSV** — stažení raw eventů s aktuálně nastavenými filtry (až 10 000 řádků, UTF-8 + BOM, otevře se rovnou v Excelu)
+  - Doughnut by source (`waf`, `firewallrules`, `botManagement`, …)
+- **Tables**:
+  - Top 30 Rule IDs *(click = filter on Rule ID)*
+  - Top 50 paths *(click = filter on Path)*
+  - Top 50 ASNs *(click = filter on ASN)*
+  - Top 50 user agents *(click = filter on UA)*
+  - Latest ~500 events (time, action, IP, ASN, country, host, path, method, rule, ray ID)
+- **Clear filters** — single button that clears all chips and inputs
+- **CSV export** — downloads the raw events for the current filters (up to 10 000 rows, UTF-8 + BOM, opens directly in Excel)
 
-## Architektura
+## Architecture
 
-| Část | Soubor | Co dělá |
+| Part | File | Purpose |
 |---|---|---|
-| Worker (TypeScript) | [src/index.ts](src/index.ts) | API endpointy — proxy na Cloudflare GraphQL Analytics API |
-| Dashboard | [public/index.html](public/index.html) | Vanilla HTML/JS + Chart.js z CDN (žádný build step) |
-| Konfigurace | [wrangler.jsonc](wrangler.jsonc) | Worker entrypoint + assets binding + vypnutí default domén |
+| Worker (TypeScript) | [src/index.ts](src/index.ts) | API endpoints — proxy to the Cloudflare GraphQL Analytics API |
+| Dashboard | [public/index.html](public/index.html) | Vanilla HTML/JS + Chart.js from CDN (no build step) |
+| Configuration | [wrangler.jsonc](wrangler.jsonc) | Worker entrypoint + assets binding + disabling the default domains |
 
-### API endpointy
+### API endpoints
 
-| Endpoint | Popis |
+| Endpoint | Description |
 |---|---|
-| `GET /api/accounts` | Seznam nakonfigurovaných účtů (jen `id` + `label`, nikdy token) |
-| `GET /api/zones?account=<id>` | Seznam zón daného účtu |
-| `GET /api/stats?account=<id>&zone=<id>&...filters` | Agregace + posledních 500 eventů (vše v jednom requestu) |
-| `GET /api/log?account=<id>&zone=<id>&...filters` | Jen eventy (limit ovládatelný přes `&limit=`) |
-| `GET /api/export.csv?account=<id>&zone=<id>&...filters` | CSV export raw eventů (až 10 000 řádků, `Content-Disposition: attachment`) |
+| `GET /api/accounts` | List of configured accounts (only `id` + `label`, never a token) |
+| `GET /api/zones?account=<id>` | List of zones for the given account |
+| `GET /api/stats?account=<id>&zone=<id>&...filters` | Aggregations + latest 500 events (everything in a single request) |
+| `GET /api/log?account=<id>&zone=<id>&...filters` | Events only (limit controllable via `&limit=`) |
+| `GET /api/export.csv?account=<id>&zone=<id>&...filters` | CSV export of raw events (up to 10 000 rows, `Content-Disposition: attachment`) |
 
-### Pozn. k Free tieru — agregace v Workeru
+### Note about the Free tier — aggregation runs in the Worker
 
-Cloudflare dataset `firewallEventsAdaptiveGroups` (server-side agregace) **vyžaduje Pro+ plán**. Na Free je dostupný jen `firewallEventsAdaptive` (raw eventy, 24 h, max 10 000 řádků per request). Worker proto stahuje raw eventy a všechny statistiky (`byAction`, `byCountry`, `byHost`, `byPath`, `byRule`, `bySource`, `byAsn`, `byUserAgent`, `series`) počítá JS-em. V odpovědi je `totalSampled` a `truncated` — pokud zóna překročí 10 000 eventů za 24 h, dashboard tě upozorní, že statistiky jsou ze sample.
+The Cloudflare `firewallEventsAdaptiveGroups` dataset (server-side aggregation) **requires the Pro+ plan**. On Free only `firewallEventsAdaptive` is available (raw events, 24 h, max 10 000 rows per request). The Worker therefore fetches raw events and computes all statistics (`byAction`, `byCountry`, `byHost`, `byPath`, `byRule`, `bySource`, `byAsn`, `byUserAgent`, `series`) in JS. The response includes `totalSampled` and `truncated` — if a zone exceeds 10 000 events in 24 h, the dashboard will warn you that the statistics are based on a sample.
 
-### Drill-down facety + cache
+### Drill-down facets + caching
 
-Filtry `country / host / path / rule / asn / ua` jsou **facet-style multi-select**:
-- Klik na položku v tabulce / baru = přidání do filtru, klik znovu = odebrání.
-- Aktivní položka je zvýrazněná, ostatní zůstávají viditelné (zesědivélé) — typický faceted-search UX.
-- Worker tyto filtry aplikuje v JS, ne v GraphQL queries. CF se ptá jen na `action + source + zone + datetime`.
+The filters `country / host / path / rule / asn / ua` are **facet-style multi-select**:
+- Clicking an item in a table / bar adds it to the filter, clicking again removes it.
+- The active item is highlighted, the others stay visible (greyed out) — classic faceted-search UX.
+- The Worker applies these filters in JS, not in the GraphQL query. CF is only asked about `action + source + zone + datetime`.
 
-Ve Worker Cache API se cachuje výsledek outer GraphQL fetche (TTL 5 min, klicované podle `acc + zone + 5min bucket(time) + action + source`). Klikání na facety mezi sebou je tedy **instantní** (cache HIT) — škalí se místo 500–2000ms latence z CF na <50ms. Indikátor `⚡ cache HIT / ☁ cache MISS` + latence se zobrazuje v hlavičce dashboardu.
+The result of the outer GraphQL fetch is cached in the Worker Cache API (TTL 5 min, keyed by `acc + zone + 5-min bucket(time) + action + source`). Toggling facets between each other is therefore **instant** (cache HIT) — instead of 500–2000 ms of CF latency you get <50 ms. A `⚡ cache HIT / ☁ cache MISS` indicator with the request latency is shown in the dashboard header.
 
-## Konfigurace tajemství
+## Secret configuration
 
-**Vše citlivé je jen ve Worker secretech.** V repu ani ve `wrangler.jsonc` nic citlivého není.
+**All sensitive data lives only in Worker secrets.** Nothing sensitive is committed to the repo or to `wrangler.jsonc`.
 
-Pro **každý CF účet** vytvoř TŘI secrety:
+For **each CF account** create THREE secrets:
 
-| Secret name | Popis | Příklad |
+| Secret name | Description | Example |
 |---|---|---|
-| `CFACC_<ID>_LABEL` | Co se ukáže v UI dropdownu | `Můj účet` |
-| `CFACC_<ID>_ACCOUNT` | Cloudflare Account ID (32 hex znaků) | `b151c3e2ed3c7da7c439c74fb09fad63` |
-| `CFACC_<ID>_TOKEN` | Cloudflare API token (read-only, viz níže) | `cf_xxx...` |
+| `CFACC_<ID>_LABEL` | Label shown in the UI dropdown | `My account` |
+| `CFACC_<ID>_ACCOUNT` | Cloudflare Account ID (32 hex chars) | `b151c3e2ed3c7da7c439c74fb09fad63` |
+| `CFACC_<ID>_TOKEN` | Cloudflare API token (read-only, see below) | `cf_xxx...` |
 
-`<ID>` je libovolný krátký identifikátor (`PERSONAL`, `ACME`, `NOVA`, …). Objevuje se v URL `?account=<id>`. Worker interně normalizuje na lowercase.
+`<ID>` is any short identifier (`PERSONAL`, `ACME`, `NOVA`, …). It appears in the URL as `?account=<id>`. The Worker normalises it to lowercase internally.
 
-**Přidání nového účtu** = vytvoříš tři nové secrety. Žádné existující se nemění, nemusíš znát staré tokeny.
-**Rotace tokenu** = přepíšeš jen `CFACC_<ID>_TOKEN`.
-**Smazání účtu** = smaž jeho tři secrety.
+**Adding a new account** = create three new secrets. Nothing existing changes, you do not need to know the older tokens.
+**Token rotation** = overwrite just `CFACC_<ID>_TOKEN`.
+**Removing an account** = delete its three secrets.
 
-### Cloudflare API token — jak ho vytvořit
+### Cloudflare API token — how to create one
 
-> **Přepni se nejdřív do toho účtu**, jehož data chceš číst (levý horní roh dashboardu). Token je vázaný na účet, kde byl vytvořen — token vytvořený na jiném účtu nebude vidět cizí zóny.
+> **First switch into the account** whose data you want to read (top-left switcher in the dashboard). The token is tied to the account it was created in — a token created in a different account will not see foreign zones.
 
 1. **My Profile → API Tokens → Create Token → Custom token**
-2. **Token name**: např. `waf-log-personal`
-3. **Permission policy** — vlevo nahoře v selectoru Resources zvol **All Domains**
-   *(NE "Entire Account" — pod tím nejsou zone-level permissiony jako Zone:Read a Zone Analytics:Read)*
-4. V kategoriích zaškrtni:
+2. **Token name**: e.g. `waf-log-personal`
+3. **Permission policy** — in the top-left Resources selector pick **All Domains**
+   *(NOT "Entire Account" — that scope does not contain zone-level permissions such as Zone:Read and Zone Analytics:Read)*
+4. Tick in the categories:
    - **DNS & Zones → Zone : Read**
    - **Analytics & Logs → Analytics : Read**
-5. *(volitelně)* Client IP filtering, TTL — nech default
-6. **Continue → Create Token** → zkopíruj (zobrazí se jen jednou)
+5. *(optional)* Client IP filtering, TTL — leave at default
+6. **Continue → Create Token** → copy it (shown only once)
 
 ## Setup
 
-### Lokální vývoj
+### Local development
 
 ```powershell
 npm install
 
-# Vytvoř .dev.vars (NEcommitovat — je v .gitignore).
+# Create .dev.vars (DO NOT commit — it's in .gitignore).
 @'
-CFACC_PERSONAL_LABEL=Můj účet
+CFACC_PERSONAL_LABEL=My account
 CFACC_PERSONAL_ACCOUNT=b151c3e2ed3c7da7c439c74fb09fad63
 CFACC_PERSONAL_TOKEN=cf_xxx
 '@ | Out-File -Encoding utf8 .dev.vars
@@ -112,80 +112,84 @@ CFACC_PERSONAL_TOKEN=cf_xxx
 npm run dev
 ```
 
-Otevři <http://localhost:8787>.
+Open <http://localhost:8787>.
 
-### Produkce — Worker secrets
+### Production — Worker secrets
 
-V dashboardu: **Workers & Pages → tvůj Worker → Settings → Variables and Secrets → Add → Type: Secret**
+In the dashboard: **Workers & Pages → your Worker → Settings → Variables and Secrets → Add → Type: Secret**
 
-Pro každý účet přidej tři secrety (`CFACC_<ID>_LABEL`, `CFACC_<ID>_ACCOUNT`, `CFACC_<ID>_TOKEN`).
-Po přidání všech klikni **Deploy** (jednou — aplikuje všechny najednou).
+For each account add three secrets (`CFACC_<ID>_LABEL`, `CFACC_<ID>_ACCOUNT`, `CFACC_<ID>_TOKEN`).
+After adding all of them click **Deploy** (once — applies all changes together).
 
-Nebo přes CLI:
+Or via the CLI:
 ```powershell
-"Můj účet"  | npx wrangler secret put CFACC_PERSONAL_LABEL
+"My account" | npx wrangler secret put CFACC_PERSONAL_LABEL
 "abc123..."  | npx wrangler secret put CFACC_PERSONAL_ACCOUNT
-"cf_xxx..." | npx wrangler secret put CFACC_PERSONAL_TOKEN
+"cf_xxx..."  | npx wrangler secret put CFACC_PERSONAL_TOKEN
 ```
 
-### Deploy přes GitHub → Cloudflare Workers Builds
+### Deploy via GitHub → Cloudflare Workers Builds
 
-1. Push repo na GitHub
-2. **Workers & Pages → Create → Workers → Connect to Git**, vyber repo
+1. Push the repo to GitHub
+2. **Workers & Pages → Create → Workers → Connect to Git**, choose the repo
 3. Build settings:
-   - **Build command**: *(prázdné — žádný build není potřeba)*
+   - **Build command**: *(leave empty — no build is required)*
    - **Deploy command**: `npx wrangler deploy`
    - **Non-production deploy command**: `npx wrangler versions upload`
-   - **Builds for non-production branches**: nech vypnuté (preview URL jsou stejně zakázané v configu)
-4. Po prvním deployi přidej secrety (viz výše)
-5. Každý push do `main` od teď spustí auto deploy
+   - **Builds for non-production branches**: leave disabled (preview URLs are disabled in the config anyway)
+4. After the first deploy add the secrets (see above)
+5. Every push to `main` then triggers an auto-deploy
 
-### Custom doména
+### Custom domain
 
-`*.workers.dev` URL je vypnutá ([wrangler.jsonc](wrangler.jsonc) — `workers_dev: false`), takže Worker je přístupný pouze přes custom doménu. Nastavení:
+The `*.workers.dev` URL is disabled ([wrangler.jsonc](wrangler.jsonc) — `workers_dev: false`), so the Worker is only reachable via a custom domain. Setup:
 
 1. **Worker → Settings → Domains & Routes → Add → Custom Domain**
-2. Zadej doménu, např. `cf.tvojedomena.cz` (musí být zóna v CF na stejném účtu jako worker)
-3. CF automaticky vytvoří `CNAME` a TLS cert
+2. Enter the domain, e.g. `waf.example.com` (must be a zone on the same CF account as the worker)
+3. CF automatically creates the `CNAME` and issues a TLS cert
 
-### Ochrana přístupu — Cloudflare Access (Zero Trust)
+### Access protection — Cloudflare Access (Zero Trust)
 
-Worker je bez ochrany veřejný a vystavoval by data všech zákaznických účtů. **MUSÍ být za Access:**
+Without protection the Worker is public and would expose data from all customer accounts. **It MUST sit behind Access:**
 
 1. **Zero Trust dashboard → Access → Applications → Add application → Self-hosted**
-2. Application domain: `cf.tvojedomena.cz` (custom doména z předchozího kroku)
-3. Path: nech prázdné (chrání celý hostname včetně `/api/*`)
+2. Application domain: `waf.example.com` (the custom domain from the previous step)
+3. Path: leave empty (protects the whole hostname including `/api/*`)
 4. **Policy** → Add policy:
    - Action: `Allow`
-   - Include: `Emails: tvuj@email.cz` (nebo IdP group, …)
-5. Save & deploy aplikaci
+   - Include: `Emails: you@example.com` (or an IdP group, …)
+5. Save & deploy the application
 
-Bez platné Access session vrátí Worker 302 na CF Access login page.
+Without a valid Access session the Worker returns 302 to the CF Access login page.
 
-## Důležité — vypnutí default domén
+## Important — disabling the default domains
 
-V [wrangler.jsonc](wrangler.jsonc) jsou natvrdo:
-- `workers_dev: false` — vypíná `<worker>.<subdomain>.workers.dev`
-- `preview_urls: false` — vypíná preview URL z `wrangler versions upload`
+[wrangler.jsonc](wrangler.jsonc) hard-codes:
+- `workers_dev: false` — disables `<worker>.<subdomain>.workers.dev`
+- `preview_urls: false` — disables preview URLs from `wrangler versions upload`
 
-Bez toho Wrangler při každém deployi default domény znovu zapne, což by obešlo Access (preview URL nemá Access policy nastavenou). Pokud potřebuješ default doménu zase zapnout, smaž tyhle řádky z configu.
+Without this Wrangler would re-enable the default domains on every deploy, which would bypass Access (preview URLs have no Access policy attached). If you ever need to enable the default domain again, delete these lines from the config.
 
-## Omezení Free tieru
+## Free tier limitations
 
-- **Retence WAF eventů**: 24 h (Pro 72 h, Biz 30 d, Ent 6 m) — limit Cloudflare, ne tohoto kódu
-- **Max 10 000 eventů per request** — pokud zóna překročí, statistiky jsou ze sample (vidíš varování `truncated: true` v response)
-- **Worker quoty**: 100 000 req/den, 10 ms CPU
-- **GraphQL rate limit**: ~1 200 req/5 min na token (každý účet má vlastní → škáluje s počtem účtů)
-- **`firewallEventsAdaptiveGroups` (server-side agregace) je Pro+ only** — proto Worker agreguje raw eventy v JS
+- **WAF event retention**: 24 h (Pro 72 h, Biz 30 d, Ent 6 m) — Cloudflare limit, not this code
+- **Max 10 000 events per request** — if the zone exceeds this, statistics are based on a sample (you'll see `truncated: true` in the response)
+- **Worker quotas**: 100 000 req/day, 10 ms CPU
+- **GraphQL rate limit**: ~1 200 req/5 min per token (each account has its own → scales with the number of accounts)
+- **`firewallEventsAdaptiveGroups` (server-side aggregation) is Pro+ only** — that is why the Worker aggregates raw events in JS
 
-## Bezpečnostní poznámky
+## Security notes
 
-- Tokeny mají read-only práva — i v případě úniku secretu nelze v CF účtech nic měnit
-- Frontend nikdy nedostane token — `GET /api/accounts` vrací jen `id` + `label`
-- Worker musí být za Cloudflare Access — bez něj je dashboard veřejný
-- `.dev.vars` je v [.gitignore](.gitignore)
+- Tokens have read-only permissions — even a leaked secret cannot change anything in the CF accounts
+- The frontend never receives a token — `GET /api/accounts` returns only `id` + `label`
+- The Worker must sit behind Cloudflare Access — otherwise the dashboard is public
+- `.dev.vars` is listed in [.gitignore](.gitignore)
 
-## Možná rozšíření
+## Possible extensions
 
-- Cron Trigger → ukládat agregace do D1/R2 pro historii delší než 24 h
-- Alerting webhook (Slack/Discord) při překročení prahu blokovaných requestů
+- Cron Trigger → store aggregations in D1/R2 for history longer than 24 h
+- Alerting webhook (Slack/Discord) when the blocked-request threshold is exceeded
+
+## License
+
+[MIT](LICENSE)

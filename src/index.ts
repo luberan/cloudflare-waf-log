@@ -2,31 +2,31 @@
  * Cloudflare Worker — WAF events dashboard (multi-account)
  *
  * Endpoints:
- *   GET /api/accounts                              → seznam nakonfigurovaných účtů (id + label)
- *   GET /api/zones?account=<id>                    → seznam zón daného účtu
- *   GET /api/log?account=<id>&zone=<id>&...        → individuální eventy (firewallEventsAdaptive)
- *   GET /api/stats?account=<id>&zone=<id>&...      → agregace (firewallEventsAdaptiveGroups)
- *   GET /api/export.csv?account=<id>&zone=<id>&... → CSV export raw eventů (až 10 000 řádků)
+ *   GET /api/accounts                              → list of configured accounts (id + label)
+ *   GET /api/zones?account=<id>                    → list of zones for the given account
+ *   GET /api/log?account=<id>&zone=<id>&...        → individual events (firewallEventsAdaptive)
+ *   GET /api/stats?account=<id>&zone=<id>&...      → aggregations (firewallEventsAdaptive, client-side grouped)
+ *   GET /api/export.csv?account=<id>&zone=<id>&... → CSV export of raw events (up to 10 000 rows)
  *
- * Konfigurace (vše jako Worker secrets — nic v repu):
- *   Pro každý CF účet vytvoř TŘI secrety:
- *     CFACC_<ID>_LABEL     – co se ukáže v UI dropdownu (např. "ACME s.r.o.")
- *     CFACC_<ID>_ACCOUNT   – Cloudflare Account ID (32 hex znaků)
+ * Configuration (everything as Worker secrets — nothing in the repo):
+ *   For each CF account create THREE secrets:
+ *     CFACC_<ID>_LABEL     – what appears in the UI dropdown (e.g. "ACME Inc.")
+ *     CFACC_<ID>_ACCOUNT   – Cloudflare Account ID (32 hex chars)
  *     CFACC_<ID>_TOKEN     – Cloudflare API token (read-only)
- *   <ID> je libovolný krátký identifikátor [A-Z0-9_], objeví se v URL ?account=<id>.
+ *   <ID> is any short identifier [A-Z0-9_], it appears in the URL as ?account=<id>.
  *
- *   Příklad — dva účty:
- *     CFACC_PERSONAL_LABEL   = "Můj účet"
+ *   Example — two accounts:
+ *     CFACC_PERSONAL_LABEL   = "My account"
  *     CFACC_PERSONAL_ACCOUNT = "abc123..."
  *     CFACC_PERSONAL_TOKEN   = "cf_xxx"
- *     CFACC_ACME_LABEL       = "ACME s.r.o."
+ *     CFACC_ACME_LABEL       = "ACME Inc."
  *     CFACC_ACME_ACCOUNT     = "def456..."
  *     CFACC_ACME_TOKEN       = "cf_yyy"
  *
- *   Přidání nového účtu = jen 3 nové secrety, nic existujícího se nemění.
- *   Rotace tokenu = přepsat jen CFACC_<ID>_TOKEN.
+ *   Adding a new account = three new secrets, nothing existing changes.
+ *   Token rotation = overwrite just CFACC_<ID>_TOKEN.
  *
- * Ochrana přístupu k samotnému dashboardu se neřeší v kódu — Worker je za Cloudflare Access.
+ * Access protection of the dashboard itself is not handled in code — the Worker sits behind Cloudflare Access.
  */
 
 export interface Env {
@@ -99,7 +99,7 @@ function loadAccounts(env: Env): Account[] {
         : "No accounts configured — set CFACC_<ID>_LABEL, _ACCOUNT, _TOKEN as Worker secrets",
     );
   }
-  return out.sort((a, b) => a.label.localeCompare(b.label, "cs"));
+  return out.sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function pickAccount(env: Env, url: URL): Account {
@@ -262,8 +262,8 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
   return data.viewer.zones[0]?.firewallEventsAdaptive ?? [];
 }
 
-// Cache TTL pro stažené eventy v Worker Cache API. Krátká TTL = data zůstávají
-// "čerstvá" (max 60s zpoždění), ale rapid facet-toggle UX je instantní.
+// Cache TTL for fetched events in the Worker Cache API. Short TTL keeps the data
+// reasonably fresh while making rapid facet-toggle UX instant.
 const EVENTS_CACHE_TTL_SECONDS = 300;
 
 async function cachedFetchEvents(
@@ -273,16 +273,17 @@ async function cachedFetchEvents(
 ): Promise<{ events: any[]; cacheState: "HIT" | "MISS" | "BYPASS" }> {
   const cache = (caches as unknown as { default?: Cache }).default;
   if (!cache) {
-    // Cache API není k dispozici (např. v testech) → fallback bez cache.
+    // Cache API not available (e.g. in tests) — fall back to a direct fetch.
     const events = await fetchEvents(acc, f, limit);
     return { events, cacheState: "BYPASS" };
   }
 
-  // Cache key — sjednotí všechny rozlišující atributy outer fetche.
-  // Účet je část keye (token rozdíl + accountId rozdíl); zone/time/action/source taky.
-  // Časové hranice zaokrouhlujeme na 5min buckety — frontend posílá `new Date().toISOString()`
-  // s ms přesností, takže bez bucketu by každý request měl unikátní key a cache by nikdy nehitla.
-  // 5min = stejně dlouhé jako TTL → během cache lifetime všechny toggle requesty hitnou stejný klíč.
+  // Cache key — unifies all attributes that distinguish the outer fetch.
+  // Account is part of the key (different token + different accountId); so are zone/time/action/source.
+  // Time bounds are rounded down to 5-minute buckets — the frontend sends `new Date().toISOString()`
+  // with millisecond precision, so without bucketing every request would have a unique key and
+  // the cache would never hit. 5 min = same as the TTL → within a cache lifetime all toggle
+  // requests hit the same key.
   const bucket = (iso: string) => {
     const ms = Date.parse(iso);
     if (!Number.isFinite(ms)) return iso;
@@ -305,8 +306,8 @@ async function cachedFetchEvents(
   }
 
   const events = await fetchEvents(acc, f, limit);
-  // ctx.waitUntil by bylo ideálnější (necháváme pokračovat request), ale Cache.put
-  // je v Workeru rychlý write do edge cache — pár ms — takže await je v pořádku.
+  // ctx.waitUntil would be slightly better (let the request finish first) but Cache.put
+  // is a fast write into edge cache — a few ms — so awaiting it is fine.
   await cache.put(
     cacheKey,
     new Response(JSON.stringify(events), {
@@ -370,16 +371,18 @@ async function exportCsv(acc: Account, f: Filters): Promise<Response> {
 }
 
 async function getSummary(acc: Account, f: Filters): Promise<Response> {
-  // Pozn.: na Free tieru NENÍ dostupný firewallEventsAdaptiveGroups (vyžaduje Pro+).
-  // Stáhneme tedy raw eventy (limit 10000 = HW limit) a agregujeme tady v Workeru.
+  // Note: on the Free tier `firewallEventsAdaptiveGroups` is NOT available (requires Pro+).
+  // So we fetch raw events (limit 10000 = hard limit) and aggregate them here in the Worker.
   //
-  // Drill-down facety (country, host, path, rule, asn, ua) aplikujeme AŽ v JS, aby každá
-  // facetová tabulka mohla ukázat všechny možnosti i když je některá z nich aktivním filtrem
-  // (typický facet-search UX: výběr v jedné facetě nesmí vymazat ostatní možnosti tamtéž).
-  // Server-side filtrujeme jen action, source, zone, datetime — ty nemají drill-down UI.
+  // Drill-down facets (country, host, path, rule, asn, ua) are applied in JS, so that each
+  // facet table can show all options even when one of them is an active filter
+  // (typical facet-search UX: selecting a value in one facet must not erase the other options
+  // in the same facet). Server-side we filter only by action, source, zone, datetime — those
+  // do not have drill-down UI.
   //
-  // Cache: outer fetch (zone+time+action+source) cachujeme v Worker Cache API. Facet toggle
-  // = identický outer fetch → cache HIT → skípne se CF GraphQL roundtrip (typicky 500–2000ms).
+  // Cache: the outer fetch (zone+time+action+source) is cached in the Worker Cache API.
+  // A facet toggle = identical outer fetch → cache HIT → the CF GraphQL roundtrip
+  // (typically 500–2000 ms) is skipped.
   const outerFilters: Filters = {
     ...f,
     clientCountryName: undefined,
@@ -440,8 +443,8 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
     .sort((a, b) => b.count - a.count)
     .slice(0, 50);
 
-  // Time series po hodinách, per akce — z filtrované sady.
-  const seriesMap = new Map<string, number>(); // klic: "hour|action"
+  // Hourly time series, per action — from the filtered set.
+  const seriesMap = new Map<string, number>(); // key: "hour|action"
   for (const e of filtered) {
     const hour = (e.datetime as string).slice(0, 13) + ":00:00Z";
     const k = `${hour}|${e.action}`;

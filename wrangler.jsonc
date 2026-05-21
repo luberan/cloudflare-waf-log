@@ -14,8 +14,11 @@
   "observability": {
     "enabled": true
   }
-  // Žádné env vars ani tajemství zde — vše se konfiguruje jako Worker secret:
-  //   ACCOUNTS = JSON pole účtů (id, label, accountId, token)
-  //   Nastavit přes:  wrangler secret put ACCOUNTS
-  //   Nebo v Cloudflare dashboardu → Worker → Settings → Variables and Secrets → Secrets
+  // No env vars or secrets here — everything is configured as a Worker secret:
+  //   For each Cloudflare account create three secrets:
+  //     CFACC_<ID>_LABEL    – label shown in the UI dropdown
+  //     CFACC_<ID>_ACCOUNT  – Cloudflare Account ID
+  //     CFACC_<ID>_TOKEN    – Cloudflare API token (read-only)
+  //   Set via:  wrangler secret put CFACC_<ID>_LABEL  (and the other two)
+  //   Or in the Cloudflare dashboard → Worker → Settings → Variables and Secrets → Secrets
 }

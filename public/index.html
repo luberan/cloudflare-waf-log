@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="cs">
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -71,9 +71,9 @@
 <header>
   <div class="row">
     <h1>🛡 WAF Dashboard <span id="perf" class="muted" style="font-size:12.5px;font-weight:400;margin-left:.5rem"></span></h1>
-    <label>Účet: <select id="account"></select></label>
-    <label>Zóna: <select id="zone"></select></label>
-    <label>Rozsah:
+    <label>Account: <select id="account"></select></label>
+    <label>Zone: <select id="zone"></select></label>
+    <label>Range:
       <select id="range">
         <option value="1">1 h</option>
         <option value="6">6 h</option>
@@ -81,12 +81,12 @@
       </select>
     </label>
     <span class="grow"></span>
-    <button id="clearFilters" title="Vymaže všechny filtry (akce, host, cesta, rule, země, ASN, UA)">Vyčistit</button>
-    <button id="exportCsv" title="Export raw eventů s aktuálními filtry (max 10 000 řádků)">Export CSV</button>
-    <button id="refresh" class="primary">Načíst</button>
+    <button id="clearFilters" title="Clears all filters (action, host, path, rule, country, ASN, UA)">Clear</button>
+    <button id="exportCsv" title="Export raw events with current filters (up to 10 000 rows)">Export CSV</button>
+    <button id="refresh" class="primary">Load</button>
   </div>
   <div class="row" style="gap:.5rem">
-    <span class="muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:.04em">Akce:</span>
+    <span class="muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:.04em">Action:</span>
     <div class="row-actions" id="actionChips">
       <span class="chip" data-action="block">block</span>
       <span class="chip" data-action="managed_challenge">managed_challenge</span>
@@ -98,14 +98,14 @@
     </div>
   </div>
   <details class="filters-bar" id="filtersDetails">
-    <summary>Filtry <span id="filtersActiveCount" class="badge-count" style="display:none">0</span><span class="muted" style="margin-left:auto;font-size:11px">klik = rozbalit</span></summary>
+    <summary>Filters <span id="filtersActiveCount" class="badge-count" style="display:none">0</span><span class="muted" style="margin-left:auto;font-size:11px">click to expand</span></summary>
     <div class="filters-grid">
       <label>Host <input id="hostFilter" type="text" placeholder="www.example.com" /></label>
-      <label>Cesta <input id="pathFilter" type="text" placeholder="/wp-login.php" /></label>
+      <label>Path <input id="pathFilter" type="text" placeholder="/wp-login.php" /></label>
       <label>Rule ID <input id="ruleFilter" type="text" placeholder="uuid,uuid" /></label>
-      <label>Země <input id="countryFilter" type="text" placeholder="CZ,DE" /></label>
+      <label>Country <input id="countryFilter" type="text" placeholder="US,DE" /></label>
       <label>ASN <input id="asnFilter" type="text" placeholder="13335,15169" /></label>
-      <label>User-Agent <input id="uaFilter" type="text" placeholder="přesná shoda UA" /></label>
+      <label>User-Agent <input id="uaFilter" type="text" placeholder="exact UA match" /></label>
     </div>
   </details>
 </header>
@@ -113,28 +113,28 @@
 <div id="error" class="err" style="display:none;margin:1rem"></div>
 
 <main>
-  <section class="panel col-3 stat"><span class="l">Celkem eventů</span><span class="v" id="kpiTotal">–</span></section>
-  <section class="panel col-3 stat"><span class="l">Blokované</span><span class="v" id="kpiBlock">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Total events</span><span class="v" id="kpiTotal">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Blocked</span><span class="v" id="kpiBlock">–</span></section>
   <section class="panel col-3 stat"><span class="l">Challenge</span><span class="v" id="kpiChallenge">–</span></section>
   <section class="panel col-3 stat"><span class="l">Allow / Log</span><span class="v" id="kpiAllow">–</span></section>
 
-  <section class="panel col-8"><h2>Eventy v čase (po hodině)</h2><div class="chart-wrap tall"><canvas id="chartSeries"></canvas></div></section>
-  <section class="panel col-4"><h2>Podle akce</h2><div class="chart-wrap"><canvas id="chartAction"></canvas></div></section>
+  <section class="panel col-8"><h2>Events over time (hourly)</h2><div class="chart-wrap tall"><canvas id="chartSeries"></canvas></div></section>
+  <section class="panel col-4"><h2>By action</h2><div class="chart-wrap"><canvas id="chartAction"></canvas></div></section>
 
-  <section class="panel col-6"><h2>Top země <span class="muted">(klik = filtr)</span></h2><div class="chart-wrap"><canvas id="chartCountry"></canvas></div></section>
-  <section class="panel col-6"><h2>Top hostnames <span class="muted">(klik = filtr)</span></h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
+  <section class="panel col-6"><h2>Top countries <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartCountry"></canvas></div></section>
+  <section class="panel col-6"><h2>Top hostnames <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
 
-  <section class="panel col-6"><h2>Zdroj (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource"></canvas></div></section>
-  <section class="panel col-6"><h2>Top rule IDs <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6"><h2>Source (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource"></canvas></div></section>
+  <section class="panel col-6"><h2>Top rule IDs <span class="muted">(click = filter)</span></h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></section>
 
-  <section class="panel col-12"><h2>Top cesty <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblPaths"><thead><tr><th>Cesta</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-12"><h2>Top paths <span class="muted">(click = filter)</span></h2><div class="scroll"><table id="tblPaths"><thead><tr><th>Path</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></section>
 
-  <section class="panel col-6"><h2>Top ASN <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblAsn"><thead><tr><th>ASN</th><th>Popis</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
-  <section class="panel col-6"><h2>Top User-Agents <span class="muted">(klik = filtr)</span></h2><div class="scroll"><table id="tblUa"><thead><tr><th>User-Agent</th><th class="num">Počet</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6"><h2>Top ASNs <span class="muted">(click = filter)</span></h2><div class="scroll"><table id="tblAsn"><thead><tr><th>ASN</th><th>Description</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6"><h2>Top user agents <span class="muted">(click = filter)</span></h2><div class="scroll"><table id="tblUa"><thead><tr><th>User-Agent</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></section>
 
-  <section class="panel col-12"><h2>Eventy <span class="muted" id="eventsCount"></span></h2>
+  <section class="panel col-12"><h2>Events <span class="muted" id="eventsCount"></span></h2>
     <div class="scroll"><table id="tblEvents"><thead><tr>
-      <th>Čas</th><th>Akce</th><th>Zdroj</th><th>Země</th><th>IP</th><th>ASN</th><th>Host</th><th>Cesta</th><th>Metoda</th><th>Rule</th><th>Ray</th>
+      <th>Time</th><th>Action</th><th>Source</th><th>Country</th><th>IP</th><th>ASN</th><th>Host</th><th>Path</th><th>Method</th><th>Rule</th><th>Ray</th>
     </tr></thead><tbody></tbody></table></div>
   </section>
 </main>
@@ -174,8 +174,8 @@ function buildQuery() {
 function showError(msg) { const e = $('#error'); if (msg) { e.textContent = msg; e.style.display = 'block'; } else e.style.display = 'none'; }
 
 // ── Facet (multi-select) helpers ────────────────────────────────────────────
-// Filter input je comma-separated set hodnot. Klik na položku v tabulce/grafu
-// přidá / odebere hodnotu a znovu načte data.
+// Each filter input holds a comma-separated set of values. Clicking an item in
+// a table/chart adds or removes the value and triggers a reload.
 function parseFilterSet(inputId, transform) {
   const raw = ($('#'+inputId).value || '').split(',').map(s => s.trim()).filter(Boolean);
   return new Set(transform ? raw.map(transform) : raw);
@@ -189,7 +189,7 @@ function toggleFilter(inputId, value, transform) {
   const set = parseFilterSet(inputId, transform);
   if (set.has(v)) set.delete(v); else set.add(v);
   writeFilterSet(inputId, set);
-  // Otevři filter bar, ať uživatel vidí/může upravit aktivní filtry
+  // Open the filter bar so the user can see / edit active filters
   const d = $('#filtersDetails'); if (d && !d.open) d.open = true;
   load();
 }
@@ -243,7 +243,7 @@ function barChart(canvasId, labels, values, colors, onPick) {
   });
   state.charts[canvasId] = chart;
   if (onPick) {
-    // Nativní listener na klik do oblasti tick labelů (Chart.js onClick je tu nespolehlivý)
+    // Native click listener for the tick label area (Chart.js onClick is unreliable here)
     const canvas = chart.canvas;
     const handler = (e) => {
       const rect = canvas.getBoundingClientRect();
@@ -252,7 +252,7 @@ function barChart(canvasId, labels, values, colors, onPick) {
       const area = chart.chartArea;
       const lbls = chart.data.labels;
       if (!lbls || !lbls.length) return;
-      if (x >= area.left) return; // klik do chart area řeší Chart.js onClick
+      if (x >= area.left) return; // clicks inside chart area are handled by Chart.js onClick
       if (y < area.top || y > area.bottom) return;
       const slot = (area.bottom - area.top) / lbls.length;
       const idx = Math.floor((y - area.top) / slot);
@@ -336,7 +336,7 @@ function renderAsnTable(rows) {
 }
 
 function renderUaTable(rows) {
-  // UA stringy mohou obsahovat čárky → pro UA jen single-select (klik na stejný UA filter zruší).
+  // UA strings may contain commas → use single-select for UA (clicking the same UA clears the filter).
   const current = $('#uaFilter').value.trim();
   const any = current.length > 0;
   const tbody = $('#tblUa tbody');
@@ -380,7 +380,7 @@ async function loadZones() {
   showError(''); $('#refresh').disabled = true;
   try {
     const { zones } = await api('/api/zones?account=' + encodeURIComponent(acc));
-    if (!zones.length) { $('#zone').innerHTML = ''; showError('Účet nemá žádné zóny nebo token nemá Zone: Read.'); return; }
+    if (!zones.length) { $('#zone').innerHTML = ''; showError('Account has no zones, or the token is missing Zone: Read.'); return; }
     $('#zone').innerHTML = zones.map(z => `<option value="${z.id}">${escapeHtml(z.name)} (${z.plan||'?'})</option>`).join('');
     await load();
   } catch (e) { showError(e.message); }
@@ -403,10 +403,10 @@ async function load() {
     // KPIs
     const total = summary.byAction.reduce((s, r) => s + r.count, 0);
     const get = (k) => summary.byAction.find(r => r.key === k)?.count || 0;
-    $('#kpiTotal').textContent = total.toLocaleString('cs-CZ');
-    $('#kpiBlock').textContent = get('block').toLocaleString('cs-CZ');
-    $('#kpiChallenge').textContent = (get('managed_challenge')+get('jschallenge')+get('challenge')).toLocaleString('cs-CZ');
-    $('#kpiAllow').textContent = (get('allow')+get('log')).toLocaleString('cs-CZ');
+    $('#kpiTotal').textContent = total.toLocaleString('en-US');
+    $('#kpiBlock').textContent = get('block').toLocaleString('en-US');
+    $('#kpiChallenge').textContent = (get('managed_challenge')+get('jschallenge')+get('challenge')).toLocaleString('en-US');
+    $('#kpiAllow').textContent = (get('allow')+get('log')).toLocaleString('en-US');
 
     timeSeries('chartSeries', summary.series);
     doughnut('chartAction', summary.byAction.map(r=>r.key), summary.byAction.map(r=>r.count),
@@ -434,7 +434,7 @@ async function load() {
 async function init() {
   try {
     const { accounts } = await api('/api/accounts');
-    if (!accounts.length) { showError('Žádné účty nejsou nakonfigurované v ACCOUNTS secretu.'); return; }
+    if (!accounts.length) { showError('No accounts configured — set CFACC_<ID>_LABEL, _ACCOUNT, _TOKEN as Worker secrets.'); return; }
     $('#account').innerHTML = accounts.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join('');
     document.querySelectorAll('#actionChips .chip').forEach(chip => {
       chip.addEventListener('click', () => {
@@ -468,7 +468,7 @@ async function init() {
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } catch (e) {
-        showError('Export selhal: ' + e.message);
+        showError('Export failed: ' + e.message);
       } finally {
         btn.disabled = false;
       }
