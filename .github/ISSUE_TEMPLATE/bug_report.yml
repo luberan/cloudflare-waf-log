@@ -1,0 +1,93 @@
+name: Bug report
+description: Report something that doesn't work as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report! Please fill in as much as you can — partial info is still useful.
+
+        For **security vulnerabilities**, please use [private vulnerability reporting](../../security/advisories/new) instead of a public issue.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. Screenshots welcome.
+      placeholder: When I clicked X, the dashboard showed Y instead of Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps so someone else can hit the same bug.
+      placeholder: |
+        1. Open the dashboard
+        2. Select account "X" and zone "Y"
+        3. Click on the "block" chip
+        4. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: I expected the table to show only blocked events.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      placeholder: The table stayed empty and the browser console showed "TypeError: …".
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser / OS
+      placeholder: Chrome 140 on Windows 11
+    validations:
+      required: true
+
+  - type: dropdown
+    id: cf-plan
+    attributes:
+      label: Cloudflare plan of the affected zone
+      options:
+        - Free
+        - Pro
+        - Business
+        - Enterprise
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: event-volume
+    attributes:
+      label: Approx. WAF events per 24 h on the affected zone
+      placeholder: e.g. ~2 000 (or "unknown")
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Browser console / network logs
+      description: Paste any relevant errors. Redact tokens, account IDs, IPs, hostnames.
+      render: shell
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues and this is not a duplicate
+          required: true
+        - label: I am running the latest commit on the `main` branch
+          required: true
+        - label: I removed any sensitive data (tokens, account IDs, customer hostnames) from logs and screenshots
+          required: true
