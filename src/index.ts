@@ -314,12 +314,42 @@ async function exportCsv(acc: Account, f: Filters): Promise<Response> {
 
 async function getSummary(acc: Account, f: Filters): Promise<Response> {
   // Pozn.: na Free tieru NENÍ dostupný firewallEventsAdaptiveGroups (vyžaduje Pro+).
-  // Stažneme tedy raw eventy (limit 10000 = HW limit) a agregujeme tady v Workeru.
-  const events = await fetchEvents(acc, f, 10000);
+  // Stáhneme tedy raw eventy (limit 10000 = HW limit) a agregujeme tady v Workeru.
+  //
+  // Drill-down facety (country, host, path, rule, asn, ua) aplikujeme AŽ v JS, aby každá
+  // facetová tabulka mohla ukázat všechny možnosti i když je některá z nich aktivním filtrem
+  // (typický facet-search UX: výběr v jedné facetě nesmí vymazat ostatní možnosti tamtéž).
+  // Server-side filtrujeme jen action, source, zone, datetime — ty nemají drill-down UI.
+  const events = await fetchEvents(
+    acc,
+    {
+      ...f,
+      clientCountryName: undefined,
+      clientRequestHTTPHost: undefined,
+      clientRequestPath: undefined,
+      ruleId: undefined,
+      clientAsn: undefined,
+      userAgent: undefined,
+    },
+    10000,
+  );
 
-  const counter = (key: (e: any) => string | undefined) => {
+  type Facet = "country" | "host" | "path" | "rule" | "asn" | "ua";
+  const matches = (e: any, exclude?: Facet): boolean => {
+    if (exclude !== "country" && f.clientCountryName?.length && !f.clientCountryName.includes(e.clientCountryName)) return false;
+    if (exclude !== "host" && f.clientRequestHTTPHost?.length && !f.clientRequestHTTPHost.includes(e.clientRequestHTTPHost)) return false;
+    if (exclude !== "path" && f.clientRequestPath?.length && !f.clientRequestPath.includes(e.clientRequestPath)) return false;
+    if (exclude !== "rule" && f.ruleId?.length && !f.ruleId.includes(e.ruleId)) return false;
+    if (exclude !== "asn" && f.clientAsn?.length && !f.clientAsn.includes(e.clientAsn)) return false;
+    if (exclude !== "ua" && f.userAgent?.length && !f.userAgent.includes(e.userAgent)) return false;
+    return true;
+  };
+
+  const filtered = events.filter((e) => matches(e));
+
+  const counter = (src: any[], key: (e: any) => string | undefined) => {
     const m = new Map<string, number>();
-    for (const e of events) {
+    for (const e of src) {
       const k = key(e) ?? "(unknown)";
       m.set(k, (m.get(k) ?? 0) + 1);
     }
@@ -328,16 +358,20 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
       .sort((a, b) => b.count - a.count);
   };
 
-  const byAction = counter((e) => e.action);
-  const byCountry = counter((e) => e.clientCountryName).slice(0, 50);
-  const byHost = counter((e) => e.clientRequestHTTPHost).slice(0, 50);
-  const byPath = counter((e) => e.clientRequestPath).slice(0, 50);
-  const bySource = counter((e) => e.source);
-  const byRule = counter((e) => e.ruleId).slice(0, 50);
+  const facetSrc = (exclude: Facet) => events.filter((e) => matches(e, exclude));
+
+  const byAction = counter(filtered, (e) => e.action);
+  const bySource = counter(filtered, (e) => e.source);
+  const byCountry = counter(facetSrc("country"), (e) => e.clientCountryName).slice(0, 50);
+  const byHost = counter(facetSrc("host"), (e) => e.clientRequestHTTPHost).slice(0, 50);
+  const byPath = counter(facetSrc("path"), (e) => e.clientRequestPath).slice(0, 50);
+  const byRule = counter(facetSrc("rule"), (e) => e.ruleId).slice(0, 50);
+  const byUserAgent = counter(facetSrc("ua"), (e) => e.userAgent).slice(0, 50);
 
   // ASN aggregation — group by numeric ASN, keep description as label.
+  const asnSrc = facetSrc("asn");
   const asnMap = new Map<string, { count: number; label: string }>();
-  for (const e of events) {
+  for (const e of asnSrc) {
     const asn = e.clientAsn ?? 0;
     const k = String(asn);
     const cur = asnMap.get(k);
@@ -349,11 +383,9 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
     .sort((a, b) => b.count - a.count)
     .slice(0, 50);
 
-  const byUserAgent = counter((e) => e.userAgent).slice(0, 50);
-
-  // Time series po hodinách, per akce
+  // Time series po hodinách, per akce — z filtrované sady.
   const seriesMap = new Map<string, number>(); // klic: "hour|action"
-  for (const e of events) {
+  for (const e of filtered) {
     const hour = (e.datetime as string).slice(0, 13) + ":00:00Z";
     const k = `${hour}|${e.action}`;
     seriesMap.set(k, (seriesMap.get(k) ?? 0) + 1);
@@ -374,8 +406,9 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
     byAsn,
     byUserAgent,
     series,
-    events: events.slice(0, 500),
+    events: filtered.slice(0, 500),
     totalSampled: events.length,
+    totalMatched: filtered.length,
     truncated: events.length >= 10000,
   });
 }

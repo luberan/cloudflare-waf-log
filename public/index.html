@@ -46,6 +46,10 @@
   .row-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
   .chip { background: #0c0e13; border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 11.5px; cursor: pointer; user-select: none; }
   .chip.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  tr.row-toggle { cursor: pointer; transition: opacity .12s ease; }
+  tr.row-toggle:hover td { background: rgba(246,130,31,.08); }
+  tr.row-toggle.active td { color: var(--accent); font-weight: 600; background: rgba(246,130,31,.06); }
+  tr.row-toggle.inactive td { opacity: .4; }
 </style>
 </head>
 <body>
@@ -160,6 +164,31 @@ function buildQuery() {
 
 function showError(msg) { const e = $('#error'); if (msg) { e.textContent = msg; e.style.display = 'block'; } else e.style.display = 'none'; }
 
+// ── Facet (multi-select) helpers ────────────────────────────────────────────
+// Filter input je comma-separated set hodnot. Klik na položku v tabulce/grafu
+// přidá / odebere hodnotu a znovu načte data.
+function parseFilterSet(inputId, transform) {
+  const raw = ($('#'+inputId).value || '').split(',').map(s => s.trim()).filter(Boolean);
+  return new Set(transform ? raw.map(transform) : raw);
+}
+function writeFilterSet(inputId, set) {
+  $('#'+inputId).value = [...set].join(',');
+}
+function toggleFilter(inputId, value, transform) {
+  if (value === undefined || value === null || value === '' || value === '?' || value === '(unknown)') return;
+  const v = transform ? transform(value) : String(value);
+  const set = parseFilterSet(inputId, transform);
+  if (set.has(v)) set.delete(v); else set.add(v);
+  writeFilterSet(inputId, set);
+  load();
+}
+const ACTIVE_BAR = '#f6821f';
+const INACTIVE_BAR = '#3a414e';
+function barColors(keys, active, fallback) {
+  if (!active.size) return keys.map(() => fallback);
+  return keys.map(k => active.has(k) ? ACTIVE_BAR : INACTIVE_BAR);
+}
+
 function destroyChart(key) { if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; } }
 
 function barChart(canvasId, labels, values, colors, onPick) {
@@ -214,41 +243,60 @@ function timeSeries(canvasId, series) {
 }
 
 function renderRulesTable(rows) {
+  const active = parseFilterSet('ruleFilter');
+  const any = active.size > 0;
   const tbody = $('#tblRules tbody');
-  tbody.innerHTML = rows.slice(0, 30).map(r =>
-    `<tr data-rule="${escapeHtml(r.key)}" style="cursor:pointer"><td>${escapeHtml(r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.innerHTML = rows.slice(0, 30).map(r => {
+    const isActive = active.has(r.key);
+    const cls = isActive ? 'active' : (any ? 'inactive' : '');
+    return `<tr class="row-toggle ${cls}" data-rule="${escapeHtml(r.key)}"><td>${escapeHtml(r.key)}</td><td class="num">${r.count}</td></tr>`;
+  }).join('');
   tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    $('#ruleFilter').value = tr.dataset.rule;
-    load();
+    toggleFilter('ruleFilter', tr.dataset.rule);
   }));
 }
 
 function renderPathsTable(rows) {
+  const active = parseFilterSet('pathFilter');
+  const any = active.size > 0;
   const tbody = $('#tblPaths tbody');
-  tbody.innerHTML = rows.slice(0, 50).map(r =>
-    `<tr data-path="${escapeHtml(r.key)}" style="cursor:pointer"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 100 ? r.key.slice(0,100)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.innerHTML = rows.slice(0, 50).map(r => {
+    const isActive = active.has(r.key);
+    const cls = isActive ? 'active' : (any ? 'inactive' : '');
+    return `<tr class="row-toggle ${cls}" data-path="${escapeHtml(r.key)}"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 100 ? r.key.slice(0,100)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`;
+  }).join('');
   tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    $('#pathFilter').value = tr.dataset.path;
-    load();
+    toggleFilter('pathFilter', tr.dataset.path);
   }));
 }
 
 function renderAsnTable(rows) {
+  const active = parseFilterSet('asnFilter');
+  const any = active.size > 0;
   const tbody = $('#tblAsn tbody');
-  tbody.innerHTML = rows.slice(0, 50).map(r =>
-    `<tr data-asn="${escapeHtml(r.key)}" style="cursor:pointer"><td>AS${escapeHtml(r.key)}</td><td title="${escapeHtml(r.label||'')}">${escapeHtml((r.label||'').slice(0,60))}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.innerHTML = rows.slice(0, 50).map(r => {
+    const isActive = active.has(r.key);
+    const cls = isActive ? 'active' : (any ? 'inactive' : '');
+    return `<tr class="row-toggle ${cls}" data-asn="${escapeHtml(r.key)}"><td>AS${escapeHtml(r.key)}</td><td title="${escapeHtml(r.label||'')}">${escapeHtml((r.label||'').slice(0,60))}</td><td class="num">${r.count}</td></tr>`;
+  }).join('');
   tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    $('#asnFilter').value = tr.dataset.asn;
-    load();
+    toggleFilter('asnFilter', tr.dataset.asn);
   }));
 }
 
 function renderUaTable(rows) {
+  // UA stringy mohou obsahovat čárky → pro UA jen single-select (klik na stejný UA filter zruší).
+  const current = $('#uaFilter').value.trim();
+  const any = current.length > 0;
   const tbody = $('#tblUa tbody');
-  tbody.innerHTML = rows.slice(0, 50).map(r =>
-    `<tr data-ua="${escapeHtml(r.key)}" style="cursor:pointer"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 120 ? r.key.slice(0,120)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`).join('');
+  tbody.innerHTML = rows.slice(0, 50).map(r => {
+    const isActive = current === r.key;
+    const cls = isActive ? 'active' : (any ? 'inactive' : '');
+    return `<tr class="row-toggle ${cls}" data-ua="${escapeHtml(r.key)}"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 120 ? r.key.slice(0,120)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`;
+  }).join('');
   tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    $('#uaFilter').value = tr.dataset.ua;
+    const v = tr.dataset.ua;
+    $('#uaFilter').value = ($('#uaFilter').value.trim() === v) ? '' : v;
     load();
   }));
 }
@@ -307,16 +355,14 @@ async function load() {
     timeSeries('chartSeries', summary.series);
     doughnut('chartAction', summary.byAction.map(r=>r.key), summary.byAction.map(r=>r.count),
       summary.byAction.map(r => ACTION_COLOR[r.key] || '#888'));
-    barChart('chartCountry', summary.byCountry.slice(0,15).map(r=>r.key||'?'), summary.byCountry.slice(0,15).map(r=>r.count), null, (label) => {
-      if (!label || label === '?') return;
-      $('#countryFilter').value = label;
-      load();
-    });
-    barChart('chartHost', summary.byHost.slice(0,15).map(r=>r.key||'?'), summary.byHost.slice(0,15).map(r=>r.count), null, (label) => {
-      if (!label || label === '?') return;
-      $('#hostFilter').value = label;
-      load();
-    });
+    const countryKeys = summary.byCountry.slice(0,15).map(r=>r.key||'?');
+    const activeCountry = parseFilterSet('countryFilter');
+    barChart('chartCountry', countryKeys, summary.byCountry.slice(0,15).map(r=>r.count),
+      barColors(countryKeys, activeCountry, '#3498db'), (label) => toggleFilter('countryFilter', label));
+    const hostKeys = summary.byHost.slice(0,15).map(r=>r.key||'?');
+    const activeHost = parseFilterSet('hostFilter');
+    barChart('chartHost', hostKeys, summary.byHost.slice(0,15).map(r=>r.count),
+      barColors(hostKeys, activeHost, '#3498db'), (label) => toggleFilter('hostFilter', label));
     doughnut('chartSource', summary.bySource.map(r=>r.key), summary.bySource.map(r=>r.count), PALETTE);
     renderRulesTable(summary.byRule);
     renderPathsTable(summary.byPath || []);
