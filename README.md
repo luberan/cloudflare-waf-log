@@ -52,7 +52,7 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
 
 ### Pozn. k Free tieru — agregace v Workeru
 
-Cloudflare dataset `firewallEventsAdaptiveGroups` (server-side agregace) **vyžaduje Pro+ plán**. Na Free je dostupný jen `firewallEventsAdaptive` (raw eventy, 24 h, max 10 000 řádků per request). Worker proto stahuje raw eventy a všechny statistiky (`byAction`, `byCountry`, `byHost`, `byPath`, `byRule`, `bySource`, `series`) počítá JS-em. V odpovědi je `totalSampled` a `truncated` — pokud zóna překročí 10 000 eventů za 24 h, dashboard tě upozorní, že statistiky jsou ze sample.
+Cloudflare dataset `firewallEventsAdaptiveGroups` (server-side agregace) **vyžaduje Pro+ plán**. Na Free je dostupný jen `firewallEventsAdaptive` (raw eventy, 24 h, max 10 000 řádků per request). Worker proto stahuje raw eventy a všechny statistiky (`byAction`, `byCountry`, `byHost`, `byPath`, `byRule`, `bySource`, `byAsn`, `byUserAgent`, `series`) počítá JS-em. V odpovědi je `totalSampled` a `truncated` — pokud zóna překročí 10 000 eventů za 24 h, dashboard tě upozorní, že statistiky jsou ze sample.
 
 ## Konfigurace tajemství
 
