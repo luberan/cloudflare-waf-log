@@ -262,6 +262,63 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
   return data.viewer.zones[0]?.firewallEventsAdaptive ?? [];
 }
 
+// Cache TTL pro stažené eventy v Worker Cache API. Krátká TTL = data zůstávají
+// "čerstvá" (max 60s zpoždění), ale rapid facet-toggle UX je instantní.
+const EVENTS_CACHE_TTL_SECONDS = 60;
+
+async function cachedFetchEvents(
+  acc: Account,
+  f: Filters,
+  limit: number,
+): Promise<{ events: any[]; cacheState: "HIT" | "MISS" | "BYPASS" }> {
+  const cache = (caches as unknown as { default?: Cache }).default;
+  if (!cache) {
+    // Cache API není k dispozici (např. v testech) → fallback bez cache.
+    const events = await fetchEvents(acc, f, limit);
+    return { events, cacheState: "BYPASS" };
+  }
+
+  // Cache key — sjednotí všechny rozlišující atributy outer fetche.
+  // Účet je část keye (token rozdíl + accountId rozdíl); zone/time/action/source taky.
+  // Časové hranice zaokrouhlujeme na 60s buckety — frontend posílá `new Date().toISOString()`
+  // s ms přesností, takže bez bucketu by každý request měl unikátní key a cache by nikdy nehitla.
+  // 60s = stejně dlouhé jako TTL → během cache lifetime všechny toggle requesty hitnou stejný klíč.
+  const bucket = (iso: string) => {
+    const ms = Date.parse(iso);
+    if (!Number.isFinite(ms)) return iso;
+    return new Date(Math.floor(ms / 60000) * 60000).toISOString();
+  };
+  const keyUrl = new URL("https://waf-cache.internal/events");
+  keyUrl.searchParams.set("acc", acc.id);
+  keyUrl.searchParams.set("zone", f.zoneTag);
+  keyUrl.searchParams.set("from", bucket(f.datetimeGeq));
+  keyUrl.searchParams.set("to", bucket(f.datetimeLeq));
+  keyUrl.searchParams.set("action", (f.action ?? []).slice().sort().join(","));
+  keyUrl.searchParams.set("source", (f.source ?? []).slice().sort().join(","));
+  keyUrl.searchParams.set("limit", String(limit));
+  const cacheKey = new Request(keyUrl.toString(), { method: "GET" });
+
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const events = (await cached.json()) as any[];
+    return { events, cacheState: "HIT" };
+  }
+
+  const events = await fetchEvents(acc, f, limit);
+  // ctx.waitUntil by bylo ideálnější (necháváme pokračovat request), ale Cache.put
+  // je v Workeru rychlý write do edge cache — pár ms — takže await je v pořádku.
+  await cache.put(
+    cacheKey,
+    new Response(JSON.stringify(events), {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": `public, max-age=${EVENTS_CACHE_TTL_SECONDS}`,
+      },
+    }),
+  );
+  return { events, cacheState: "MISS" };
+}
+
 async function getEvents(acc: Account, f: Filters): Promise<Response> {
   const events = await fetchEvents(acc, f, f.limit ?? 200);
   return json({ events });
@@ -320,19 +377,19 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   // facetová tabulka mohla ukázat všechny možnosti i když je některá z nich aktivním filtrem
   // (typický facet-search UX: výběr v jedné facetě nesmí vymazat ostatní možnosti tamtéž).
   // Server-side filtrujeme jen action, source, zone, datetime — ty nemají drill-down UI.
-  const events = await fetchEvents(
-    acc,
-    {
-      ...f,
-      clientCountryName: undefined,
-      clientRequestHTTPHost: undefined,
-      clientRequestPath: undefined,
-      ruleId: undefined,
-      clientAsn: undefined,
-      userAgent: undefined,
-    },
-    10000,
-  );
+  //
+  // Cache: outer fetch (zone+time+action+source) cachujeme v Worker Cache API. Facet toggle
+  // = identický outer fetch → cache HIT → skípne se CF GraphQL roundtrip (typicky 500–2000ms).
+  const outerFilters: Filters = {
+    ...f,
+    clientCountryName: undefined,
+    clientRequestHTTPHost: undefined,
+    clientRequestPath: undefined,
+    ruleId: undefined,
+    clientAsn: undefined,
+    userAgent: undefined,
+  };
+  const { events, cacheState } = await cachedFetchEvents(acc, outerFilters, 10000);
 
   type Facet = "country" | "host" | "path" | "rule" | "asn" | "ua";
   const matches = (e: any, exclude?: Facet): boolean => {
@@ -396,21 +453,25 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   });
   series.sort((a, b) => a.hour.localeCompare(b.hour));
 
-  return json({
-    byAction,
-    byCountry,
-    byHost,
-    byPath,
-    bySource,
-    byRule,
-    byAsn,
-    byUserAgent,
-    series,
-    events: filtered.slice(0, 500),
-    totalSampled: events.length,
-    totalMatched: filtered.length,
-    truncated: events.length >= 10000,
-  });
+  return json(
+    {
+      byAction,
+      byCountry,
+      byHost,
+      byPath,
+      bySource,
+      byRule,
+      byAsn,
+      byUserAgent,
+      series,
+      events: filtered.slice(0, 500),
+      totalSampled: events.length,
+      totalMatched: filtered.length,
+      truncated: events.length >= 10000,
+      cache: cacheState,
+    },
+    { headers: { "x-cache": cacheState } },
+  );
 }
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────

@@ -54,6 +54,15 @@ Plně funkční na **Free tieru** (retence WAF eventů 24 h).
 
 Cloudflare dataset `firewallEventsAdaptiveGroups` (server-side agregace) **vyžaduje Pro+ plán**. Na Free je dostupný jen `firewallEventsAdaptive` (raw eventy, 24 h, max 10 000 řádků per request). Worker proto stahuje raw eventy a všechny statistiky (`byAction`, `byCountry`, `byHost`, `byPath`, `byRule`, `bySource`, `byAsn`, `byUserAgent`, `series`) počítá JS-em. V odpovědi je `totalSampled` a `truncated` — pokud zóna překročí 10 000 eventů za 24 h, dashboard tě upozorní, že statistiky jsou ze sample.
 
+### Drill-down facety + cache
+
+Filtry `country / host / path / rule / asn / ua` jsou **facet-style multi-select**:
+- Klik na položku v tabulce / baru = přidání do filtru, klik znovu = odebrání.
+- Aktivní položka je zvýrazněná, ostatní zůstávají viditelné (zesědivélé) — typický faceted-search UX.
+- Worker tyto filtry aplikuje v JS, ne v GraphQL queries. CF se ptá jen na `action + source + zone + datetime`.
+
+Ve Worker Cache API se cachuje výsledek outer GraphQL fetche (TTL 60s, klicované podle `acc + zone + 60s bucket(time) + action + source`). Klikání na facety mezi sebou je tedy **instantní** (cache HIT) — škalí se místo 500–2000ms latence z CF na <50ms. Indikátor `⚡ cache HIT / ☁ cache MISS` + latence se zobrazuje v hlavičce dashboardu.
+
 ## Konfigurace tajemství
 
 **Vše citlivé je jen ve Worker secretech.** V repu ani ve `wrangler.jsonc` nic citlivého není.
@@ -178,6 +187,5 @@ Bez toho Wrangler při každém deployi default domény znovu zapne, což by obe
 
 ## Možná rozšíření
 
-- Cache odpovědí GraphQL v KV / Cache API
 - Cron Trigger → ukládat agregace do D1/R2 pro historii delší než 24 h
 - Alerting webhook (Slack/Discord) při překročení prahu blokovaných requestů
