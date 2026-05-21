@@ -72,7 +72,7 @@ For **each CF account** create THREE secrets:
 | Secret name | Description | Example |
 |---|---|---|
 | `CFACC_<ID>_LABEL` | Label shown in the UI dropdown | `My account` |
-| `CFACC_<ID>_ACCOUNT` | Cloudflare Account ID (32 hex chars) | `b151c3e2ed3c7da7c439c74fb09fad63` |
+| `CFACC_<ID>_ACCOUNT` | Cloudflare Account ID (32 hex chars) | `00000000000000000000000000000000` |
 | `CFACC_<ID>_TOKEN` | Cloudflare API token (read-only, see below) | `cf_xxx...` |
 
 `<ID>` is any short identifier (`PERSONAL`, `ACME`, `NOVA`, …). It appears in the URL as `?account=<id>`. The Worker normalises it to lowercase internally.
@@ -105,7 +105,7 @@ npm install
 # Create .dev.vars (DO NOT commit — it's in .gitignore).
 @'
 CFACC_PERSONAL_LABEL=My account
-CFACC_PERSONAL_ACCOUNT=b151c3e2ed3c7da7c439c74fb09fad63
+CFACC_PERSONAL_ACCOUNT=00000000000000000000000000000000
 CFACC_PERSONAL_TOKEN=cf_xxx
 '@ | Out-File -Encoding utf8 .dev.vars
 
