@@ -61,7 +61,7 @@ Filtry `country / host / path / rule / asn / ua` jsou **facet-style multi-select
 - Aktivní položka je zvýrazněná, ostatní zůstávají viditelné (zesědivélé) — typický faceted-search UX.
 - Worker tyto filtry aplikuje v JS, ne v GraphQL queries. CF se ptá jen na `action + source + zone + datetime`.
 
-Ve Worker Cache API se cachuje výsledek outer GraphQL fetche (TTL 60s, klicované podle `acc + zone + 60s bucket(time) + action + source`). Klikání na facety mezi sebou je tedy **instantní** (cache HIT) — škalí se místo 500–2000ms latence z CF na <50ms. Indikátor `⚡ cache HIT / ☁ cache MISS` + latence se zobrazuje v hlavičce dashboardu.
+Ve Worker Cache API se cachuje výsledek outer GraphQL fetche (TTL 5 min, klicované podle `acc + zone + 5min bucket(time) + action + source`). Klikání na facety mezi sebou je tedy **instantní** (cache HIT) — škalí se místo 500–2000ms latence z CF na <50ms. Indikátor `⚡ cache HIT / ☁ cache MISS` + latence se zobrazuje v hlavičce dashboardu.
 
 ## Konfigurace tajemství
 

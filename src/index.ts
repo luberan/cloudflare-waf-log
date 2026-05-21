@@ -264,7 +264,7 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
 
 // Cache TTL pro stažené eventy v Worker Cache API. Krátká TTL = data zůstávají
 // "čerstvá" (max 60s zpoždění), ale rapid facet-toggle UX je instantní.
-const EVENTS_CACHE_TTL_SECONDS = 60;
+const EVENTS_CACHE_TTL_SECONDS = 300;
 
 async function cachedFetchEvents(
   acc: Account,
@@ -280,13 +280,13 @@ async function cachedFetchEvents(
 
   // Cache key — sjednotí všechny rozlišující atributy outer fetche.
   // Účet je část keye (token rozdíl + accountId rozdíl); zone/time/action/source taky.
-  // Časové hranice zaokrouhlujeme na 60s buckety — frontend posílá `new Date().toISOString()`
+  // Časové hranice zaokrouhlujeme na 5min buckety — frontend posílá `new Date().toISOString()`
   // s ms přesností, takže bez bucketu by každý request měl unikátní key a cache by nikdy nehitla.
-  // 60s = stejně dlouhé jako TTL → během cache lifetime všechny toggle requesty hitnou stejný klíč.
+  // 5min = stejně dlouhé jako TTL → během cache lifetime všechny toggle requesty hitnou stejný klíč.
   const bucket = (iso: string) => {
     const ms = Date.parse(iso);
     if (!Number.isFinite(ms)) return iso;
-    return new Date(Math.floor(ms / 60000) * 60000).toISOString();
+    return new Date(Math.floor(ms / 300000) * 300000).toISOString();
   };
   const keyUrl = new URL("https://waf-cache.internal/events");
   keyUrl.searchParams.set("acc", acc.id);
