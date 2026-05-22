@@ -245,6 +245,13 @@ function barChart(canvasId, labels, values, colors, onPick) {
   if (onPick) {
     // Native click listener for the tick label area (Chart.js onClick is unreliable here)
     const canvas = chart.canvas;
+    // Remove any previous listener attached by an earlier render — otherwise
+    // each redraw stacks another handler that still closes over a stale chart
+    // (with stale labels from a previous zone/filter), causing flicker and
+    // unrelated values being toggled.
+    if (canvas._tickClickHandler) {
+      canvas.removeEventListener('click', canvas._tickClickHandler);
+    }
     const handler = (e) => {
       const rect = canvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -258,6 +265,7 @@ function barChart(canvasId, labels, values, colors, onPick) {
       const idx = Math.floor((y - area.top) / slot);
       if (idx >= 0 && idx < lbls.length) onPick(lbls[idx]);
     };
+    canvas._tickClickHandler = handler;
     canvas.addEventListener('click', handler);
   }
 }
