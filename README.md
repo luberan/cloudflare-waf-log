@@ -37,7 +37,9 @@ Fully functional on the **Free tier** (24 h WAF event retention).
 | Part | File | Purpose |
 |---|---|---|
 | Worker (TypeScript) | [src/index.ts](src/index.ts) | API endpoints — proxy to the Cloudflare GraphQL Analytics API |
-| Dashboard | [public/index.html](public/index.html) | Vanilla HTML/JS + Chart.js (self-hosted in `public/vendor/`, no CDN, no build step) |
+| Dashboard markup | [public/index.html](public/index.html) | Vanilla HTML + CSS, no build step |
+| Dashboard logic | [public/app.js](public/app.js) | All client-side JS (fetch, charts, faceted filters) |
+| Chart.js (vendored) | `public/vendor/chart.umd.min.js` | Self-hosted Chart.js — no CDN, so the CSP can use `script-src 'self'` |
 | Configuration | [wrangler.jsonc](wrangler.jsonc) | Worker entrypoint + assets binding + disabling the default domains |
 
 ### API endpoints
@@ -162,6 +164,17 @@ Without protection the Worker is public and would expose data from all customer 
 
 Without a valid Access session the Worker returns 302 to the CF Access login page.
 
+#### Optional — verify the Access JWT in code (defense-in-depth)
+
+By default the Worker trusts that Access sits in front of it (network-level enforcement). You can additionally have the Worker **verify the Access JWT itself**, so that a misconfigured/removed Access application cannot silently expose the data. Set two more variables (plain vars, not secrets):
+
+| Variable | Description | Example |
+|---|---|---|
+| `CF_ACCESS_TEAM_DOMAIN` | Your Zero Trust team domain | `https://yourteam.cloudflareaccess.com` |
+| `CF_ACCESS_AUD` | Application Audience (AUD) tag of the Access application | `0a1b2c…` |
+
+When **both** are set, every `/api/*` request must carry a valid Access token (`Cf-Access-Jwt-Assertion` header or `CF_Authorization` cookie); the Worker checks the RS256 signature against your team's public keys plus the audience, issuer and expiry, and returns `403` otherwise. When either is unset, in-code verification is skipped (so `wrangler dev` keeps working).
+
 ## Important — disabling the default domains
 
 [wrangler.jsonc](wrangler.jsonc) hard-codes:
@@ -182,8 +195,10 @@ Without this Wrangler would re-enable the default domains on every deploy, which
 
 - Tokens have read-only permissions — even a leaked secret cannot change anything in the CF accounts
 - The frontend never receives a token — `GET /api/accounts` returns only `id` + `label`
-- The Worker must sit behind Cloudflare Access — otherwise the dashboard is public
+- The Worker must sit behind Cloudflare Access — otherwise the dashboard is public. Optionally it can also [verify the Access JWT in code](#optional--verify-the-access-jwt-in-code-defense-in-depth) as defense-in-depth
 - All assets are served with a strict `Content-Security-Policy` (`script-src 'self'`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. All scripts are self-hosted (Chart.js in `public/vendor/`, app logic in `public/app.js`) — no third-party origins are loaded
+- CSV export escapes formula-trigger characters (`= + - @`) to prevent CSV/Excel formula injection, and the download filename is sanitised
+- Upstream calls to the Cloudflare API/GraphQL have a hard timeout, so a stalled upstream returns `504` instead of hanging the Worker
 - `.dev.vars` is listed in [.gitignore](.gitignore)
 
 ## Possible extensions
