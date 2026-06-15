@@ -26,12 +26,16 @@
  *   Adding a new account = three new secrets, nothing existing changes.
  *   Token rotation = overwrite just CFACC_<ID>_TOKEN.
  *
- * Access protection of the dashboard itself is not handled in code — the Worker sits behind Cloudflare Access.
+ * Access protection: the Worker is meant to sit behind Cloudflare Access. Optionally, setting the
+ * env vars CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD turns on in-code Access JWT verification as
+ * defense-in-depth (every /api request must then carry a valid Access token).
  */
 
 export interface Env {
   ASSETS: Fetcher;
-  [key: string]: unknown; // CFACC_*_LABEL / _ACCOUNT / _TOKEN
+  // CFACC_*_LABEL / _ACCOUNT / _TOKEN per account; optionally CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD
+  // to enable in-code Cloudflare Access JWT verification.
+  [key: string]: unknown;
 }
 
 type Account = {
@@ -43,6 +47,21 @@ type Account = {
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 const CF_GRAPHQL = "https://api.cloudflare.com/client/v4/graphql";
+
+// Hard timeout for upstream Cloudflare requests so a stalled call cannot pin the Worker until the
+// platform limit. AbortSignal.timeout rejects with a TimeoutError DOMException, surfaced as 504.
+const CF_FETCH_TIMEOUT_MS = 20000;
+
+async function timedFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  try {
+    return await fetch(input, { ...init, signal: AbortSignal.timeout(CF_FETCH_TIMEOUT_MS) });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "TimeoutError") {
+      throw new HttpError(504, "upstream request to Cloudflare timed out");
+    }
+    throw e;
+  }
+}
 
 type Filters = {
   zoneTag: string;
@@ -105,20 +124,36 @@ const SECURITY_HEADERS: Record<string, string> = {
     "form-action 'self'",
 };
 
+// Accounts are derived from Worker secrets which cannot change without a redeploy (and a redeploy
+// spins up a fresh isolate), so the parsed list is memoized per Env for the isolate's lifetime.
+const accountsCache = new WeakMap<Env, Account[]>();
+
 function loadAccounts(env: Env): Account[] {
-  const ids = new Set<string>();
+  const cached = accountsCache.get(env);
+  if (cached) return cached;
+
+  // Group the CFACC_<ID>_<KIND> secrets by normalized id, reading each value from its ACTUAL key
+  // so that secrets defined with lowercase ids are not silently dropped.
+  const parts = new Map<string, { label?: string; accountId?: string; token?: string }>();
   for (const key of Object.keys(env)) {
     const m = key.match(/^CFACC_([A-Z0-9_]+)_(LABEL|ACCOUNT|TOKEN)$/i);
-    if (m) ids.add(m[1].toUpperCase());
+    if (!m) continue;
+    const val = env[key];
+    if (typeof val !== "string") continue;
+    const id = m[1].toUpperCase();
+    const kind = m[2].toUpperCase();
+    const entry = parts.get(id) ?? {};
+    if (kind === "LABEL") entry.label = val;
+    else if (kind === "ACCOUNT") entry.accountId = val;
+    else entry.token = val;
+    parts.set(id, entry);
   }
+
   const out: Account[] = [];
   const incomplete: string[] = [];
-  for (const id of ids) {
-    const label = env[`CFACC_${id}_LABEL`];
-    const accountId = env[`CFACC_${id}_ACCOUNT`];
-    const token = env[`CFACC_${id}_TOKEN`];
-    if (typeof label === "string" && typeof accountId === "string" && typeof token === "string") {
-      out.push({ id: id.toLowerCase(), label, accountId, token });
+  for (const [id, p] of parts) {
+    if (p.label !== undefined && p.accountId !== undefined && p.token !== undefined) {
+      out.push({ id: id.toLowerCase(), label: p.label, accountId: p.accountId, token: p.token });
     } else {
       incomplete.push(id);
     }
@@ -131,7 +166,9 @@ function loadAccounts(env: Env): Account[] {
         : "No accounts configured — set CFACC_<ID>_LABEL, _ACCOUNT, _TOKEN as Worker secrets",
     );
   }
-  return out.sort((a, b) => a.label.localeCompare(b.label));
+  out.sort((a, b) => a.label.localeCompare(b.label));
+  accountsCache.set(env, out);
+  return out;
 }
 
 function pickAccount(env: Env, url: URL): Account {
@@ -186,7 +223,7 @@ function parseFilters(url: URL): Filters {
 }
 
 async function cfFetch<T>(acc: Account, path: string): Promise<T> {
-  const res = await fetch(`${CF_API}${path}`, {
+  const res = await timedFetch(`${CF_API}${path}`, {
     headers: {
       authorization: `Bearer ${acc.token}`,
       "content-type": "application/json",
@@ -200,7 +237,7 @@ async function cfFetch<T>(acc: Account, path: string): Promise<T> {
 }
 
 async function gql<T>(acc: Account, query: string, variables: Record<string, unknown>): Promise<T> {
-  const res = await fetch(CF_GRAPHQL, {
+  const res = await timedFetch(CF_GRAPHQL, {
     method: "POST",
     headers: {
       authorization: `Bearer ${acc.token}`,
@@ -434,13 +471,20 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   const { events, cacheState } = await cachedFetchEvents(acc, outerFilters, 10000);
 
   type Facet = "country" | "host" | "path" | "rule" | "asn" | "ua";
+  // Precompute filter values as Sets once (instead of Array.includes per event × per facet).
+  const fCountry = f.clientCountryName?.length ? new Set(f.clientCountryName) : null;
+  const fHost = f.clientRequestHTTPHost?.length ? new Set(f.clientRequestHTTPHost) : null;
+  const fPath = f.clientRequestPath?.length ? new Set(f.clientRequestPath) : null;
+  const fRule = f.ruleId?.length ? new Set(f.ruleId) : null;
+  const fAsn = f.clientAsn?.length ? new Set(f.clientAsn) : null;
+  const fUa = f.userAgent?.length ? new Set(f.userAgent) : null;
   const matches = (e: any, exclude?: Facet): boolean => {
-    if (exclude !== "country" && f.clientCountryName?.length && !f.clientCountryName.includes(e.clientCountryName)) return false;
-    if (exclude !== "host" && f.clientRequestHTTPHost?.length && !f.clientRequestHTTPHost.includes(e.clientRequestHTTPHost)) return false;
-    if (exclude !== "path" && f.clientRequestPath?.length && !f.clientRequestPath.includes(e.clientRequestPath)) return false;
-    if (exclude !== "rule" && f.ruleId?.length && !f.ruleId.includes(e.ruleId)) return false;
-    if (exclude !== "asn" && f.clientAsn?.length && !f.clientAsn.includes(e.clientAsn)) return false;
-    if (exclude !== "ua" && f.userAgent?.length && !f.userAgent.includes(e.userAgent)) return false;
+    if (exclude !== "country" && fCountry && !fCountry.has(e.clientCountryName)) return false;
+    if (exclude !== "host" && fHost && !fHost.has(e.clientRequestHTTPHost)) return false;
+    if (exclude !== "path" && fPath && !fPath.has(e.clientRequestPath)) return false;
+    if (exclude !== "rule" && fRule && !fRule.has(e.ruleId)) return false;
+    if (exclude !== "asn" && fAsn && !fAsn.has(e.clientAsn)) return false;
+    if (exclude !== "ua" && fUa && !fUa.has(e.userAgent)) return false;
     return true;
   };
 
@@ -516,6 +560,93 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   );
 }
 
+// ── Optional Cloudflare Access verification (defense-in-depth) ──────────────────
+// Enabled only when BOTH CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are set. When enabled, every
+// /api request must carry a valid Access JWT (the Cf-Access-Jwt-Assertion header that Access
+// injects, or the CF_Authorization cookie) — verified against the team's public keys, audience
+// and expiry. When unset, verification is skipped so local `wrangler dev` and network-only Access
+// setups keep working.
+
+type AccessJwk = { kid?: string; n?: string; e?: string };
+let jwksCache: { keys: AccessJwk[]; exp: number } | null = null;
+const JWKS_TTL_MS = 3_600_000;
+
+function b64urlToBytes(s: string): Uint8Array {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function b64urlToJson<T>(s: string): T {
+  return JSON.parse(new TextDecoder().decode(b64urlToBytes(s))) as T;
+}
+
+async function getAccessJwks(teamDomain: string): Promise<AccessJwk[]> {
+  if (jwksCache && jwksCache.exp > Date.now()) return jwksCache.keys;
+  const res = await timedFetch(`${teamDomain}/cdn-cgi/access/certs`, { method: "GET" });
+  if (!res.ok) throw new HttpError(403, "unable to fetch Access signing keys");
+  const body = (await res.json()) as { keys?: AccessJwk[] };
+  const keys = body.keys ?? [];
+  jwksCache = { keys, exp: Date.now() + JWKS_TTL_MS };
+  return keys;
+}
+
+async function verifyAccess(env: Env, request: Request): Promise<void> {
+  const rawTeam = typeof env.CF_ACCESS_TEAM_DOMAIN === "string" ? env.CF_ACCESS_TEAM_DOMAIN.trim() : "";
+  const aud = typeof env.CF_ACCESS_AUD === "string" ? env.CF_ACCESS_AUD.trim() : "";
+  if (!rawTeam || !aud) return; // verification not configured → skip
+
+  const teamDomain = (rawTeam.startsWith("http") ? rawTeam : `https://${rawTeam}`).replace(/\/+$/, "");
+
+  const fromCookie = (request.headers.get("cookie") ?? "")
+    .split(/;\s*/)
+    .find((c) => c.startsWith("CF_Authorization="))
+    ?.slice("CF_Authorization=".length);
+  const token = request.headers.get("cf-access-jwt-assertion") || fromCookie;
+  if (!token) throw new HttpError(403, "missing Cloudflare Access token");
+
+  const segments = token.split(".");
+  if (segments.length !== 3) throw new HttpError(403, "malformed Access token");
+  const [rawHeader, rawPayload, rawSig] = segments;
+
+  let header: { alg?: string; kid?: string };
+  let payload: { aud?: string | string[]; exp?: number; iss?: string };
+  try {
+    header = b64urlToJson(rawHeader);
+    payload = b64urlToJson(rawPayload);
+  } catch {
+    throw new HttpError(403, "invalid Access token");
+  }
+  if (header.alg !== "RS256" || !header.kid) throw new HttpError(403, "unsupported Access token");
+
+  const jwk = (await getAccessJwks(teamDomain)).find((k) => k.kid === header.kid);
+  if (!jwk?.n || !jwk.e) throw new HttpError(403, "unknown Access signing key");
+
+  const key = await crypto.subtle.importKey(
+    "jwk",
+    { kty: "RSA", n: jwk.n, e: jwk.e, alg: "RS256", ext: true },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"],
+  );
+  const ok = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    b64urlToBytes(rawSig),
+    new TextEncoder().encode(`${rawHeader}.${rawPayload}`),
+  );
+  if (!ok) throw new HttpError(403, "invalid Access token signature");
+
+  if (typeof payload.exp !== "number" || payload.exp < Math.floor(Date.now() / 1000)) {
+    throw new HttpError(403, "expired Access token");
+  }
+  if (payload.iss !== teamDomain) throw new HttpError(403, "Access token issuer mismatch");
+  const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!auds.includes(aud)) throw new HttpError(403, "Access token audience mismatch");
+}
+
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
 export default {
@@ -530,6 +661,8 @@ export default {
     }
 
     try {
+      await verifyAccess(env, request);
+
       if (url.pathname === "/api/accounts") return listAccounts(env);
 
       const account = pickAccount(env, url);

@@ -225,8 +225,8 @@ function renderEvents(events) {
   const tbody = $('#tblEvents tbody');
   tbody.innerHTML = events.map(e => `
     <tr>
-      <td>${(e.datetime||'').replace('T',' ').slice(0,19)}</td>
-      <td><span class="badge b-${e.action}">${e.action||''}</span></td>
+      <td>${escapeHtml((e.datetime||'').replace('T',' ').slice(0,19))}</td>
+      <td><span class="badge b-${escapeHtml(e.action||'')}">${escapeHtml(e.action||'')}</span></td>
       <td>${escapeHtml(e.source||'')}</td>
       <td>${escapeHtml(e.clientCountryName||'')}</td>
       <td>${escapeHtml(e.clientIP||'')}</td>
