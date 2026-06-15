@@ -37,7 +37,7 @@ Fully functional on the **Free tier** (24 h WAF event retention).
 | Part | File | Purpose |
 |---|---|---|
 | Worker (TypeScript) | [src/index.ts](src/index.ts) | API endpoints — proxy to the Cloudflare GraphQL Analytics API |
-| Dashboard | [public/index.html](public/index.html) | Vanilla HTML/JS + Chart.js from CDN (no build step) |
+| Dashboard | [public/index.html](public/index.html) | Vanilla HTML/JS + Chart.js (self-hosted in `public/vendor/`, no CDN, no build step) |
 | Configuration | [wrangler.jsonc](wrangler.jsonc) | Worker entrypoint + assets binding + disabling the default domains |
 
 ### API endpoints
@@ -183,6 +183,7 @@ Without this Wrangler would re-enable the default domains on every deploy, which
 - Tokens have read-only permissions — even a leaked secret cannot change anything in the CF accounts
 - The frontend never receives a token — `GET /api/accounts` returns only `id` + `label`
 - The Worker must sit behind Cloudflare Access — otherwise the dashboard is public
+- All assets are served with a strict `Content-Security-Policy` (`script-src 'self'`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. All scripts are self-hosted (Chart.js in `public/vendor/`, app logic in `public/app.js`) — no third-party origins are loaded
 - `.dev.vars` is listed in [.gitignore](.gitignore)
 
 ## Possible extensions

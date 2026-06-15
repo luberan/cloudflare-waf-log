@@ -65,6 +65,7 @@ function json(data: unknown, init: ResponseInit = {}): Response {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
       ...(init.headers || {}),
     },
   });
@@ -73,6 +74,36 @@ function json(data: unknown, init: ResponseInit = {}): Response {
 function err(status: number, message: string): Response {
   return json({ error: message }, { status });
 }
+
+/** An error carrying an HTTP status, so request-validation failures surface as 4xx instead of 500. */
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+// Security headers applied to every static asset response. The dashboard self-hosts all of its
+// scripts (Chart.js lives in /vendor, the app logic in /app.js), so the CSP can lock scripts to
+// same-origin. Inline styles / style attributes are still used, hence 'unsafe-inline' for style only.
+const SECURITY_HEADERS: Record<string, string> = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "x-frame-options": "DENY",
+  "content-security-policy":
+    "default-src 'self'; " +
+    "script-src 'self'; " +
+    "style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data:; " +
+    "font-src 'self'; " +
+    "connect-src 'self'; " +
+    "frame-ancestors 'none'; " +
+    "base-uri 'none'; " +
+    "object-src 'none'; " +
+    "form-action 'self'",
+};
 
 function loadAccounts(env: Env): Account[] {
   const ids = new Set<string>();
@@ -93,7 +124,8 @@ function loadAccounts(env: Env): Account[] {
     }
   }
   if (out.length === 0) {
-    throw new Error(
+    throw new HttpError(
+      500,
       incomplete.length
         ? `Account(s) ${incomplete.join(", ")} are missing one of LABEL/ACCOUNT/TOKEN secrets`
         : "No accounts configured — set CFACC_<ID>_LABEL, _ACCOUNT, _TOKEN as Worker secrets",
@@ -104,15 +136,15 @@ function loadAccounts(env: Env): Account[] {
 
 function pickAccount(env: Env, url: URL): Account {
   const id = url.searchParams.get("account");
-  if (!id) throw new Error("missing 'account' query parameter");
+  if (!id) throw new HttpError(400, "missing 'account' query parameter");
   const acc = loadAccounts(env).find((a) => a.id === id);
-  if (!acc) throw new Error(`unknown account '${id}'`);
+  if (!acc) throw new HttpError(404, `unknown account '${id}'`);
   return acc;
 }
 
 function parseFilters(url: URL): Filters {
   const zone = url.searchParams.get("zone");
-  if (!zone) throw new Error("missing 'zone' query parameter");
+  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
 
   const now = new Date();
   const defaultFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -186,7 +218,13 @@ async function gql<T>(acc: Account, query: string, variables: Record<string, unk
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 function listAccounts(env: Env): Response {
-  const accounts = loadAccounts(env).map((a) => ({ id: a.id, label: a.label }));
+  // Never 500 here — an empty list lets the dashboard show its first-run setup hint.
+  let accounts: { id: string; label: string }[] = [];
+  try {
+    accounts = loadAccounts(env).map((a) => ({ id: a.id, label: a.label }));
+  } catch (e) {
+    if (!(e instanceof HttpError)) throw e;
+  }
   return json({ accounts });
 }
 
@@ -358,7 +396,8 @@ async function exportCsv(acc: Account, f: Filters): Promise<Response> {
   // UTF-8 BOM so Excel opens it with correct encoding.
   const body = "\uFEFF" + lines.join("\r\n") + "\r\n";
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const filename = `waf-${acc.id}-${f.zoneTag.slice(0, 8)}-${stamp}.csv`;
+  const safeZone = f.zoneTag.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8) || "zone";
+  const filename = `waf-${acc.id}-${safeZone}-${stamp}.csv`;
   return new Response(body, {
     headers: {
       "content-type": "text/csv; charset=utf-8",
@@ -484,7 +523,10 @@ export default {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith("/api/")) {
-      return env.ASSETS.fetch(request);
+      const res = await env.ASSETS.fetch(request);
+      const headers = new Headers(res.headers);
+      for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v);
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
     }
 
     try {
@@ -499,6 +541,7 @@ export default {
 
       return err(404, "not found");
     } catch (e) {
+      if (e instanceof HttpError) return err(e.status, e.message);
       console.error("Unhandled API error:", e);
       return err(500, "internal server error");
     }
