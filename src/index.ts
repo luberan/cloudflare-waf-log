@@ -598,7 +598,12 @@ async function verifyAccess(env: Env, request: Request): Promise<void> {
   const aud = typeof env.CF_ACCESS_AUD === "string" ? env.CF_ACCESS_AUD.trim() : "";
   if (!rawTeam || !aud) return; // verification not configured → skip
 
-  const teamDomain = (rawTeam.startsWith("http") ? rawTeam : `https://${rawTeam}`).replace(/\/+$/, "");
+  // Normalize: ensure a scheme and strip trailing slashes. A plain loop (not a `/\/+$/` regex)
+  // avoids polynomial backtracking on inputs with many trailing slashes.
+  const withScheme = rawTeam.startsWith("http") ? rawTeam : `https://${rawTeam}`;
+  let end = withScheme.length;
+  while (end > 0 && withScheme[end - 1] === "/") end--;
+  const teamDomain = withScheme.slice(0, end);
 
   const fromCookie = (request.headers.get("cookie") ?? "")
     .split(/;\s*/)
