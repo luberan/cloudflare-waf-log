@@ -733,7 +733,68 @@ async function httpPerf(acc: Account, r: HttpRange, timeDim: string): Promise<Ht
 // cacheStatus dimension values that count as "served from cache" for the cached-% KPI.
 const CACHED_STATUSES = new Set(["hit", "stale", "revalidated", "updating"]);
 
+type HttpLimits = { enabled: boolean; notOlderThan: number; maxDuration: number; maxRangeSeconds: number };
+
+// Per-zone/plan limits for httpRequestsAdaptiveGroups from the GraphQL Settings node. Best-effort:
+// any failure returns zeros so callers fall back to a safe default instead of surfacing a 500.
+async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits> {
+  const query = /* GraphQL */ `
+    query HttpSettings($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          settings {
+            httpRequestsAdaptiveGroups { enabled notOlderThan maxDuration }
+          }
+        }
+      }
+    }
+  `;
+  type Resp = {
+    viewer: {
+      zones: {
+        settings: {
+          httpRequestsAdaptiveGroups:
+            | { enabled?: boolean; notOlderThan?: number; maxDuration?: number }
+            | null;
+        };
+      }[];
+    };
+  };
+  try {
+    const data = await gql<Resp>(acc, query, { zoneTag: zone });
+    const s = data.viewer.zones[0]?.settings?.httpRequestsAdaptiveGroups ?? null;
+    const notOlderThan = Number(s?.notOlderThan) || 0; // how far back we can read (seconds)
+    const maxDuration = Number(s?.maxDuration) || 0; // widest single-query window (seconds)
+    // A window ending "now" must fit BOTH: width <= maxDuration and start >= now - notOlderThan.
+    const candidates = [notOlderThan, maxDuration].filter((n) => n > 0);
+    const maxRangeSeconds = candidates.length ? Math.min(...candidates) : 0;
+    return { enabled: s?.enabled ?? true, notOlderThan, maxDuration, maxRangeSeconds };
+  } catch {
+    return { enabled: true, notOlderThan: 0, maxDuration: 0, maxRangeSeconds: 0 };
+  }
+}
+
+// When the Settings node can't tell us the real limit, still allow well beyond the 24 h WAF cap —
+// httpRequestsAdaptiveGroups is retained far longer on every plan. 7 days is a conservative width
+// that stays within the dataset's maxDuration, so the stats query won't be rejected as too wide.
+const HTTP_FALLBACK_RANGE_SECONDS = 7 * 24 * 60 * 60;
+
 async function buildHttpStats(acc: Account, r: HttpRange) {
+  // Clamp the requested window to what this zone is actually allowed to query in one go, so a wide
+  // range (e.g. 30 d) comes back as the longest available slice instead of failing as too wide.
+  const limits = await httpLimitsSeconds(acc, r.zoneTag);
+  const effectiveMax = limits.maxRangeSeconds > 0 ? limits.maxRangeSeconds : HTTP_FALLBACK_RANGE_SECONDS;
+  const untilMs = Date.parse(r.untilIso);
+  const sinceMs = Date.parse(r.sinceIso);
+  const requestedSeconds =
+    Number.isFinite(untilMs) && Number.isFinite(sinceMs) ? Math.max(0, Math.round((untilMs - sinceMs) / 1000)) : 0;
+  let clamped = false;
+  if (requestedSeconds > effectiveMax) {
+    r = { ...r, sinceIso: new Date(untilMs - effectiveMax * 1000).toISOString() };
+    clamped = true;
+  }
+  const effectiveSeconds = Math.max(0, Math.round((untilMs - Date.parse(r.sinceIso)) / 1000));
+
   // Minute resolution for short windows, hourly otherwise — both are always-available time dimensions.
   const hours = (Date.parse(r.untilIso) - Date.parse(r.sinceIso)) / 3_600_000;
   const timeDim = hours <= 2 ? "datetimeMinute" : "datetimeHour";
@@ -782,6 +843,12 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
 
   return {
     timeDim,
+    range: {
+      requestedSeconds,
+      effectiveSeconds,
+      clamped,
+      maxRangeSeconds: limits.maxRangeSeconds,
+    },
     series,
     byCountry,
     byStatus,
@@ -841,45 +908,8 @@ async function getHttpStats(acc: Account, url: URL): Promise<Response> {
 async function getHttpSettings(acc: Account, url: URL): Promise<Response> {
   const zone = url.searchParams.get("zone");
   if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
-  const query = /* GraphQL */ `
-    query HttpSettings($zoneTag: String!) {
-      viewer {
-        zones(filter: { zoneTag: $zoneTag }) {
-          settings {
-            httpRequestsAdaptiveGroups {
-              enabled
-              notOlderThan
-              maxDuration
-            }
-          }
-        }
-      }
-    }
-  `;
-  type Resp = {
-    viewer: {
-      zones: {
-        settings: {
-          httpRequestsAdaptiveGroups: {
-            enabled?: boolean;
-            notOlderThan?: number;
-            maxDuration?: number;
-          } | null;
-        };
-      }[];
-    };
-  };
-  const data = await gql<Resp>(acc, query, { zoneTag: zone });
-  const s = data.viewer.zones[0]?.settings?.httpRequestsAdaptiveGroups ?? null;
-  const notOlderThan = Number(s?.notOlderThan) || 0; // seconds we can read back into the past
-  const maxDuration = Number(s?.maxDuration) || 0; // widest single-query window, in seconds
-  // A window ending "now" must fit BOTH limits: width <= maxDuration and start >= now - notOlderThan.
-  const candidates = [notOlderThan, maxDuration].filter((n) => n > 0);
-  const maxRangeSeconds = candidates.length ? Math.min(...candidates) : 0;
-  return json(
-    { enabled: s?.enabled ?? true, notOlderThan, maxDuration, maxRangeSeconds },
-    { headers: { "cache-control": "private, max-age=300" } },
-  );
+  const limits = await httpLimitsSeconds(acc, zone);
+  return json(limits, { headers: { "cache-control": "private, max-age=300" } });
 }
 
 // ── Optional Cloudflare Access verification (defense-in-depth) ──────────────────

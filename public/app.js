@@ -330,6 +330,13 @@ function fmtBytes(n) {
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i === 0 ? n.toFixed(0) : n.toFixed(n >= 10 ? 0 : 1)) + ' ' + u[i];
 }
+function fmtDuration(secs) {
+  secs = Number(secs) || 0;
+  const d = Math.round(secs / 86400);
+  if (d >= 1) return d + (d === 1 ? ' day' : ' days');
+  const h = Math.max(1, Math.round(secs / 3600));
+  return h + (h === 1 ? ' hour' : ' hours');
+}
 function fmtTimeLabel(t, dim) {
   const s = String(t || '');
   return dim === 'datetimeMinute' ? s.slice(11, 16) : s.replace('T', ' ').slice(5, 16);
@@ -449,7 +456,11 @@ async function loadHttp() {
       perfChart('chartHttpPerf', d.perf.series || [], d.timeDim);
     }
 
-    if (!d.series.length) showWarn('No HTTP traffic in the selected range for this zone.');
+    if (d.range && d.range.clamped) {
+      showWarn('Selected range exceeds this zone\u2019s HTTP-analytics limit \u2014 showing the most recent ' + fmtDuration(d.range.effectiveSeconds) + '.');
+    } else if (!d.series.length) {
+      showWarn('No HTTP traffic in the selected range for this zone.');
+    }
   } catch (e) {
     if (seq === loadSeq) showError(e.message);
   } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
@@ -480,19 +491,22 @@ function setRangeOptions(maxHours, preferValue) {
     : 'WAF events are retained 24 h on the Free plan';
 }
 
-// Max selectable HTTP range (hours) for the current zone, from the Settings node. Cached per zone.
+// HTTP data is retained well beyond the 24 h WAF cap, so when the Settings lookup can't pin an exact
+// limit we still offer the full set (the backend clamps the actual query to what the plan allows).
+const HTTP_FALLBACK_MAX_H = 720; // 30 d
 async function fetchHttpLimits() {
   const acc = $('#account').value, zone = $('#zone').value;
-  if (!acc || !zone) return WAF_MAX_H;
+  if (!acc || !zone) return HTTP_FALLBACK_MAX_H;
   const key = acc + '|' + zone;
   if (state.httpLimits[key] != null) return state.httpLimits[key];
+  let h = HTTP_FALLBACK_MAX_H;
   try {
     const s = await api('/api/http-settings?account=' + encodeURIComponent(acc) + '&zone=' + encodeURIComponent(zone));
-    let h = Math.floor((s.maxRangeSeconds || 0) / 3600);
-    if (!h || h < WAF_MAX_H) h = WAF_MAX_H; // always allow at least 24 h
-    state.httpLimits[key] = h;
-    return h;
-  } catch { return WAF_MAX_H; }
+    const secs = Number(s.maxRangeSeconds) || 0;
+    if (secs >= 3600) h = Math.max(WAF_MAX_H, Math.floor(secs / 3600));
+  } catch { /* keep the generous fallback */ }
+  state.httpLimits[key] = h;
+  return h;
 }
 
 // Rebuild the range dropdown for the active tab (HTTP needs an async limits lookup), then load.
