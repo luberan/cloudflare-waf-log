@@ -567,9 +567,11 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
 // aggregation on the Free plan — so here we let Cloudflare do the grouping and only assemble the
 // chart-ready shape, instead of pulling raw events and counting in JS.
 //
-// Adaptive sampling: a group's count/sum cover only the SAMPLED events; multiplying by that group's
-// avg sampleInterval estimates the true value (sampleInterval is 1 for low-traffic zones, so the
-// scaling is a no-op for small sites and correctly extrapolates for busy ones).
+// Numbers are scoped to eyeball requests (requestSource: eyeball) to match Cloudflare's HTTP Traffic
+// dashboard. For the *Groups* datasets Cloudflare already returns count/sum extrapolated to the true
+// estimate, so we use them as-is — multiplying by sampleInterval would double-count and inflate
+// wide-window queries (where sampling kicks in) by the sample factor, which is exactly what made a
+// 24 h view show ~10x the real numbers (and vary every time the sampling rate changed).
 
 type HttpRange = { zoneTag: string; sinceIso: string; untilIso: string };
 
@@ -591,10 +593,10 @@ function parseHttpRange(url: URL): HttpRange {
 }
 
 // Time + zone filter as a GraphQL object literal. Values are normalized ISO strings (see above).
+// requestSource: eyeball limits to real end-user requests (excludes Worker sub-requests etc.) — the
+// same scoping Cloudflare's HTTP Traffic dashboard uses, so the totals line up with it.
 const httpFilter = (r: HttpRange) =>
-  `{ datetime_geq: "${r.sinceIso}", datetime_leq: "${r.untilIso}" }`;
-
-const sampleScale = (g: any): number => g?.avg?.sampleInterval ?? 1;
+  `{ datetime_geq: "${r.sinceIso}", datetime_leq: "${r.untilIso}", requestSource: eyeball }`;
 
 type HttpGroup = { key: string; requests: number; bytes: number };
 
@@ -615,8 +617,7 @@ async function httpGroupBy(
       viewer {
         zones(filter: { zoneTag: $zoneTag }) {
           g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: ${limit}, orderBy: [count_DESC]) {
-            count
-            avg { sampleInterval }${bytes ? "\n            sum { edgeResponseBytes }" : ""}
+            count${bytes ? "\n            sum { edgeResponseBytes }" : ""}
             dimensions { ${dimension} }
           }
         }
@@ -628,14 +629,11 @@ async function httpGroupBy(
     const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
     const groups = data.viewer.zones[0]?.g ?? [];
     return groups
-      .map((g) => {
-        const s = sampleScale(g);
-        return {
-          key: String(g.dimensions?.[dimension] ?? ""),
-          requests: Math.round((g.count ?? 0) * s),
-          bytes: Math.round((g.sum?.edgeResponseBytes ?? 0) * s),
-        };
-      })
+      .map((g) => ({
+        key: String(g.dimensions?.[dimension] ?? ""),
+        requests: Math.round(g.count ?? 0),
+        bytes: Math.round(g.sum?.edgeResponseBytes ?? 0),
+      }))
       .filter((x) => x.key !== "");
   };
   if (!optional) return run();
@@ -655,7 +653,6 @@ async function httpSeries(acc: Account, r: HttpRange, timeDim: string): Promise<
         zones(filter: { zoneTag: $zoneTag }) {
           g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
             count
-            avg { sampleInterval }
             sum { edgeResponseBytes visits }
             dimensions { ${timeDim} }
           }
@@ -666,15 +663,12 @@ async function httpSeries(acc: Account, r: HttpRange, timeDim: string): Promise<
   type Resp = { viewer: { zones: { g: any[] }[] } };
   const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
   const groups = data.viewer.zones[0]?.g ?? [];
-  return groups.map((g) => {
-    const s = sampleScale(g);
-    return {
-      t: g.dimensions?.[timeDim] as string,
-      requests: Math.round((g.count ?? 0) * s),
-      bytes: Math.round((g.sum?.edgeResponseBytes ?? 0) * s),
-      visits: Math.round((g.sum?.visits ?? 0) * s),
-    };
-  });
+  return groups.map((g) => ({
+    t: g.dimensions?.[timeDim] as string,
+    requests: Math.round(g.count ?? 0),
+    bytes: Math.round(g.sum?.edgeResponseBytes ?? 0),
+    visits: Math.round(g.sum?.visits ?? 0),
+  }));
 }
 
 type HttpPerf = {
