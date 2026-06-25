@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { actions: new Set(), charts: {} };
+const state = { actions: new Set(), charts: {}, tab: 'waf' };
 let loadSeq = 0;
 
 const PALETTE = ['#e74c3c','#f1c40f','#3498db','#2ecc71','#9b59b6','#1abc9c','#e67e22','#34495e','#ff7675','#74b9ff'];
@@ -27,6 +27,19 @@ function buildQuery() {
   const country = $('#countryFilter').value.trim(); if (country) p.set('country', country.toUpperCase());
   const asn = $('#asnFilter').value.trim(); if (asn) p.set('asn', asn);
   const ua = $('#uaFilter').value.trim(); if (ua) p.set('ua', ua);
+  return p.toString();
+}
+
+// Shared account/zone/time-range params, without the WAF-only facet filters (used by the HTTP tab).
+function buildBaseQuery() {
+  const p = new URLSearchParams();
+  p.set('account', $('#account').value);
+  p.set('zone', $('#zone').value);
+  const hours = Number($('#range').value);
+  const until = new Date();
+  const since = new Date(until.getTime() - hours*3600*1000);
+  p.set('since', since.toISOString());
+  p.set('until', until.toISOString());
   return p.toString();
 }
 
@@ -250,7 +263,7 @@ async function loadZones() {
     const { zones } = await api('/api/zones?account=' + encodeURIComponent(acc));
     if (!zones.length) { $('#zone').innerHTML = ''; showError('Account has no zones, or the token is missing Zone: Read.'); return; }
     $('#zone').innerHTML = zones.map(z => `<option value="${z.id}">${escapeHtml(z.name)} (${z.plan||'?'})</option>`).join('');
-    await load();
+    await loadActive();
   } catch (e) { showError(e.message); }
   finally { $('#refresh').disabled = false; }
 }
@@ -307,6 +320,157 @@ async function load() {
   } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
 }
 
+// ── HTTP Traffic tab ────────────────────────────────────────────────────────
+const STATUS_COLOR = { '2xx':'#2ecc71', '3xx':'#3498db', '4xx':'#f1c40f', '5xx':'#e74c3c', 'other':'#9b59b6' };
+
+function fmtNum(n) { return Math.round(n || 0).toLocaleString('en-US'); }
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  const u = ['B','KB','MB','GB','TB','PB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(n >= 10 ? 0 : 1)) + ' ' + u[i];
+}
+function fmtTimeLabel(t, dim) {
+  const s = String(t || '');
+  return dim === 'datetimeMinute' ? s.slice(11, 16) : s.replace('T', ' ').slice(5, 16);
+}
+function statusClass(code) {
+  const n = Number(code);
+  if (n >= 200 && n < 300) return '2xx';
+  if (n >= 300 && n < 400) return '3xx';
+  if (n >= 400 && n < 500) return '4xx';
+  if (n >= 500 && n < 600) return '5xx';
+  return 'other';
+}
+function togglePanel(id, show) { const el = $('#'+id); if (el) el.style.display = show ? '' : 'none'; }
+
+function comboChart(canvasId, labels, bars, line, barLabel, lineLabel) {
+  destroyChart(canvasId);
+  state.charts[canvasId] = new Chart($('#'+canvasId), {
+    data: { labels, datasets: [
+      { type:'bar', label:barLabel, data:bars, backgroundColor:'#3498db', borderWidth:0, yAxisID:'y', order:2 },
+      { type:'line', label:lineLabel, data:line, borderColor:'#f6821f', backgroundColor:'#f6821f', tension:.3, pointRadius:0, borderWidth:2, yAxisID:'y1', order:1 },
+    ]},
+    options: {
+      maintainAspectRatio:false,
+      interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{ labels:{ color:'#e6e8ee' } },
+        tooltip:{ callbacks:{ label:(c)=> c.dataset.yAxisID==='y1' ? `${c.dataset.label}: ${fmtBytes(c.parsed.y)}` : `${c.dataset.label}: ${fmtNum(c.parsed.y)}` } } },
+      scales:{
+        x:{ ticks:{ color:'#8a93a6', maxRotation:0, autoSkip:true, maxTicksLimit:12 }, grid:{ color:'#262b36' } },
+        y:{ position:'left', beginAtZero:true, ticks:{ color:'#8a93a6' }, grid:{ color:'#262b36' } },
+        y1:{ position:'right', beginAtZero:true, ticks:{ color:'#8a93a6', callback:(v)=>fmtBytes(v) }, grid:{ display:false } },
+      }
+    }
+  });
+}
+
+function perfChart(canvasId, series, dim) {
+  destroyChart(canvasId);
+  const labels = series.map(s => fmtTimeLabel(s.t, dim));
+  state.charts[canvasId] = new Chart($('#'+canvasId), {
+    type:'line',
+    data:{ labels, datasets:[
+      { label:'Origin response (ms)', data:series.map(s=>s.originMs), borderColor:'#e67e22', backgroundColor:'#e67e22', tension:.3, pointRadius:0, borderWidth:2, spanGaps:true },
+      { label:'Edge TTFB (ms)', data:series.map(s=>s.ttfbMs), borderColor:'#3498db', backgroundColor:'#3498db', tension:.3, pointRadius:0, borderWidth:2, spanGaps:true },
+    ]},
+    options:{ maintainAspectRatio:false, plugins:{ legend:{ labels:{ color:'#e6e8ee' } } },
+      scales:{ x:{ ticks:{ color:'#8a93a6', maxRotation:0, autoSkip:true, maxTicksLimit:12 }, grid:{ color:'#262b36' } }, y:{ beginAtZero:true, ticks:{ color:'#8a93a6' }, grid:{ color:'#262b36' } } } }
+  });
+}
+
+function renderHttpStatusDoughnut(byStatus) {
+  const m = new Map();
+  for (const r of byStatus) { const c = statusClass(r.key); m.set(c, (m.get(c)||0) + r.requests); }
+  const order = ['2xx','3xx','4xx','5xx','other'];
+  const labels = order.filter(k => m.has(k));
+  doughnut('chartHttpStatus', labels, labels.map(k=>m.get(k)), labels.map(k=>STATUS_COLOR[k]));
+}
+
+function renderHttpPaths(rows) {
+  $('#tblHttpPaths tbody').innerHTML = rows.slice(0, 50).map(r =>
+    `<tr><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 100 ? r.key.slice(0,100)+'…' : r.key)}</td><td class="num">${fmtNum(r.requests)}</td><td class="num">${fmtBytes(r.bytes)}</td></tr>`
+  ).join('');
+}
+
+function renderHttpStatusTable(rows) {
+  const sorted = [...rows].sort((a,b) => b.requests - a.requests);
+  $('#tblHttpStatus tbody').innerHTML = sorted.slice(0, 30).map(r =>
+    `<tr><td><span class="badge b-status-${statusClass(r.key)}">${escapeHtml(String(r.key))}</span></td><td class="num">${fmtNum(r.requests)}</td></tr>`
+  ).join('');
+}
+
+async function loadHttp() {
+  if (!$('#zone').value) return;
+  const seq = ++loadSeq;
+  showError(''); showWarn(''); $('#refresh').disabled = true;
+  const t0 = performance.now();
+  try {
+    const d = await api('/api/http-stats?' + buildBaseQuery());
+    if (seq !== loadSeq) return; // superseded by a newer load
+
+    const dur = Math.round(performance.now() - t0);
+    const cache = d.cache || '—';
+    const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
+    $('#perf').textContent = `${dur} ms  ·  ${tag}`;
+
+    $('#hkpiReq').textContent = fmtNum(d.totals.requests);
+    $('#hkpiBytes').textContent = fmtBytes(d.totals.bytes);
+    $('#hkpiVisits').textContent = fmtNum(d.totals.visits);
+    $('#hkpiCached').textContent = (d.totals.cachedPct == null) ? '—' : d.totals.cachedPct.toFixed(0) + '%';
+
+    const labels = d.series.map(s => fmtTimeLabel(s.t, d.timeDim));
+    comboChart('chartHttpSeries', labels, d.series.map(s=>s.requests), d.series.map(s=>s.bytes), 'Requests', 'Data transfer');
+
+    renderHttpStatusDoughnut(d.byStatus || []);
+
+    const cKeys = (d.byCountry || []).slice(0,15).map(r => r.key || '?');
+    barChart('chartHttpCountry', cKeys, (d.byCountry || []).slice(0,15).map(r=>r.requests), cKeys.map(()=>'#3498db'));
+    const hKeys = (d.byHost || []).slice(0,15).map(r => r.key || '?');
+    barChart('chartHttpHost', hKeys, (d.byHost || []).slice(0,15).map(r=>r.requests), hKeys.map(()=>'#2ecc71'));
+
+    togglePanel('panelHttpCache', d.byCacheStatus && d.byCacheStatus.length);
+    if (d.byCacheStatus && d.byCacheStatus.length)
+      doughnut('chartHttpCache', d.byCacheStatus.map(r=>r.key), d.byCacheStatus.map(r=>r.requests), d.byCacheStatus.map((_,i)=>PALETTE[i%PALETTE.length]));
+    togglePanel('panelHttpContentType', d.byContentType && d.byContentType.length);
+    if (d.byContentType && d.byContentType.length)
+      doughnut('chartHttpContentType', d.byContentType.slice(0,8).map(r=>r.key), d.byContentType.slice(0,8).map(r=>r.requests), PALETTE);
+    togglePanel('panelHttpVersion', d.byHttpVersion && d.byHttpVersion.length);
+    if (d.byHttpVersion && d.byHttpVersion.length)
+      doughnut('chartHttpVersion', d.byHttpVersion.map(r=>r.key), d.byHttpVersion.map(r=>r.requests), PALETTE);
+
+    renderHttpPaths(d.byPath || []);
+    renderHttpStatusTable(d.byStatus || []);
+
+    togglePanel('panelHttpPerf', !!d.perf);
+    if (d.perf) {
+      $('#hkpiOrigin').textContent = d.perf.originMs == null ? '—' : Math.round(d.perf.originMs) + ' ms';
+      $('#hkpiTtfb').textContent = d.perf.ttfbMs == null ? '—' : Math.round(d.perf.ttfbMs) + ' ms';
+      perfChart('chartHttpPerf', d.perf.series || [], d.timeDim);
+    }
+
+    if (!d.series.length) showWarn('No HTTP traffic in the selected range for this zone.');
+  } catch (e) {
+    if (seq === loadSeq) showError(e.message);
+  } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
+}
+
+// ── Tab routing ─────────────────────────────────────────────────────────────
+function loadActive() { return state.tab === 'http' ? loadHttp() : load(); }
+
+function setTab(tab) {
+  if (state.tab === tab) return;
+  state.tab = tab;
+  document.querySelectorAll('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  const isHttp = tab === 'http';
+  $('#view-waf').style.display = isHttp ? 'none' : '';
+  $('#view-http').style.display = isHttp ? '' : 'none';
+  // WAF-only header controls (action chips, filters, Clear/Export) make no sense on the HTTP tab.
+  ['wafActions','filtersDetails','wafControls'].forEach(id => { const el = $('#'+id); if (el) el.style.display = isHttp ? 'none' : ''; });
+  showError(''); showWarn(''); $('#perf').textContent = '';
+  loadActive();
+}
+
 async function init() {
   try {
     const { accounts } = await api('/api/accounts');
@@ -319,7 +483,7 @@ async function init() {
         chip.classList.toggle('active');
       });
     });
-    $('#refresh').addEventListener('click', load);
+    $('#refresh').addEventListener('click', loadActive);
     $('#exportCsv').addEventListener('click', async () => {
       if (!$('#zone').value) return;
       const btn = $('#exportCsv');
@@ -357,8 +521,9 @@ async function init() {
       load();
     });
     $('#account').addEventListener('change', loadZones);
-    $('#zone').addEventListener('change', load);
-    $('#range').addEventListener('change', load);
+    $('#zone').addEventListener('change', loadActive);
+    $('#range').addEventListener('change', loadActive);
+    document.querySelectorAll('#tabs .tab').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
     await loadZones();
   } catch (e) { showError(e.message); }
 }

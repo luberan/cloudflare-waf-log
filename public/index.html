@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>WAF Dashboard</title>
+<title>Cloudflare Dashboard</title>
 <script src="/vendor/chart.umd.min.js"></script>
 <style>
   :root {
@@ -66,12 +66,25 @@
   tr.row-toggle:hover td { background: rgba(246,130,31,.08); }
   tr.row-toggle.active td { color: var(--accent); font-weight: 600; background: rgba(246,130,31,.06); }
   tr.row-toggle.inactive td { opacity: .4; }
+  .tabs { display: flex; gap: .4rem; }
+  .tab { background: #0c0e13; border: 1px solid var(--border); border-radius: 6px; padding: .45rem .9rem; color: var(--muted); font-weight: 600; cursor: pointer; }
+  .tab:hover { color: var(--fg); }
+  .tab.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .b-status-2xx { background: rgba(46,204,113,.15); color: #6cf09a; }
+  .b-status-3xx { background: rgba(52,152,219,.15); color: #74c3ff; }
+  .b-status-4xx { background: rgba(241,196,15,.15); color: #ffd84d; }
+  .b-status-5xx { background: rgba(231,76,60,.15); color: #ff7a6b; }
+  .b-status-other { background: rgba(155,89,182,.15); color: #c39bd3; }
 </style>
 </head>
 <body>
 <header>
   <div class="row">
-    <h1>🛡 WAF Dashboard <span id="perf" class="muted" style="font-size:12.5px;font-weight:400;margin-left:.5rem"></span></h1>
+    <h1>☁ Cloudflare <span id="perf" class="muted" style="font-size:12.5px;font-weight:400;margin-left:.5rem"></span></h1>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="waf">🛡 WAF</button>
+      <button class="tab" data-tab="http">📊 HTTP Traffic</button>
+    </div>
     <label>Account: <select id="account"></select></label>
     <label>Zone: <select id="zone"></select></label>
     <label>Range:
@@ -82,11 +95,13 @@
       </select>
     </label>
     <span class="grow"></span>
-    <button id="clearFilters" title="Clears all filters (action, host, path, rule, country, ASN, UA)">Clear</button>
-    <button id="exportCsv" title="Export raw events with current filters (up to 10 000 rows)">Export CSV</button>
+    <span id="wafControls">
+      <button id="clearFilters" title="Clears all filters (action, host, path, rule, country, ASN, UA)">Clear</button>
+      <button id="exportCsv" title="Export raw events with current filters (up to 10 000 rows)">Export CSV</button>
+    </span>
     <button id="refresh" class="primary">Load</button>
   </div>
-  <div class="row" style="gap:.5rem">
+  <div class="row" id="wafActions" style="gap:.5rem">
     <span class="muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:.04em">Action:</span>
     <div class="row-actions" id="actionChips">
       <span class="chip" data-action="block">block</span>
@@ -114,7 +129,7 @@
 <div id="error" class="err" style="display:none;margin:1rem"></div>
 <div id="warn" class="warn" style="display:none;margin:1rem"></div>
 
-<main>
+<main id="view-waf">
   <section class="panel col-3 stat"><span class="l">Total events</span><span class="v" id="kpiTotal">–</span></section>
   <section class="panel col-3 stat"><span class="l">Blocked</span><span class="v" id="kpiBlock">–</span></section>
   <section class="panel col-3 stat"><span class="l">Challenge</span><span class="v" id="kpiChallenge">–</span></section>
@@ -138,6 +153,34 @@
     <div class="scroll"><table id="tblEvents"><thead><tr>
       <th>Time</th><th>Action</th><th>Source</th><th>Country</th><th>IP</th><th>ASN</th><th>Host</th><th>Path</th><th>Method</th><th>Rule</th><th>Ray</th>
     </tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+
+<main id="view-http" style="display:none">
+  <section class="panel col-3 stat"><span class="l">Requests</span><span class="v" id="hkpiReq">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Data transfer</span><span class="v" id="hkpiBytes">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Visits</span><span class="v" id="hkpiVisits">–</span></section>
+  <section class="panel col-3 stat"><span class="l">Cached</span><span class="v" id="hkpiCached">–</span></section>
+
+  <section class="panel col-8"><h2>Requests &amp; data transfer over time</h2><div class="chart-wrap tall"><canvas id="chartHttpSeries"></canvas></div></section>
+  <section class="panel col-4"><h2>By status class</h2><div class="chart-wrap"><canvas id="chartHttpStatus"></canvas></div></section>
+
+  <section class="panel col-6"><h2>Top countries</h2><div class="chart-wrap"><canvas id="chartHttpCountry"></canvas></div></section>
+  <section class="panel col-6"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHttpHost"></canvas></div></section>
+
+  <section class="panel col-4" id="panelHttpCache"><h2>Cache status</h2><div class="chart-wrap"><canvas id="chartHttpCache"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpContentType"><h2>Content type</h2><div class="chart-wrap"><canvas id="chartHttpContentType"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpVersion"><h2>HTTP version</h2><div class="chart-wrap"><canvas id="chartHttpVersion"></canvas></div></section>
+
+  <section class="panel col-6"><h2>Top paths</h2><div class="scroll"><table id="tblHttpPaths"><thead><tr><th>Path</th><th class="num">Requests</th><th class="num">Data</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6"><h2>Status codes</h2><div class="scroll"><table id="tblHttpStatus"><thead><tr><th>Status</th><th class="num">Requests</th></tr></thead><tbody></tbody></table></div></section>
+
+  <section class="panel col-12" id="panelHttpPerf"><h2>Edge performance <span class="muted">— origin response &amp; edge TTFB (avg ms)</span></h2>
+    <div class="row" style="display:flex;gap:2.5rem;margin-bottom:.85rem">
+      <div class="stat"><span class="l">Avg origin response</span><span class="v" id="hkpiOrigin">–</span></div>
+      <div class="stat"><span class="l">Avg edge TTFB</span><span class="v" id="hkpiTtfb">–</span></div>
+    </div>
+    <div class="chart-wrap"><canvas id="chartHttpPerf"></canvas></div>
   </section>
 </main>
 
