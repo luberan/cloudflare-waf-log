@@ -1,7 +1,12 @@
 # Cloudflare WAF Dashboard
 
-A Cloudflare Worker that visualises WAF / Security events across **multiple Cloudflare accounts** (your own + customer accounts).
+A Cloudflare Worker that visualises WAF / Security events **and HTTP traffic analytics** across **multiple Cloudflare accounts** (your own + customer accounts).
 Fully functional on the **Free tier** (24 h WAF event retention).
+
+The UI has two tabs that share the account / zone / time-range selectors:
+
+- **🛡 WAF** — firewall / security events (the original dashboard, see below).
+- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Backed by `httpRequestsAdaptiveGroups`, whose **server-side aggregation works on the Free plan** (no Pro+ needed) and is retained longer than 24 h.
 
 ## Features
 
@@ -48,7 +53,8 @@ Fully functional on the **Free tier** (24 h WAF event retention).
 |---|---|
 | `GET /api/accounts` | List of configured accounts (only `id` + `label`, never a token) |
 | `GET /api/zones?account=<id>` | List of zones for the given account |
-| `GET /api/stats?account=<id>&zone=<id>&...filters` | Aggregations + latest 500 events (everything in a single request) |
+| `GET /api/stats?account=<id>&zone=<id>&...filters` | WAF aggregations + latest 500 events (everything in a single request) |
+| `GET /api/http-stats?account=<id>&zone=<id>&since=&until=` | HTTP traffic + edge performance aggregations (`httpRequestsAdaptiveGroups`, server-side grouped) |
 | `GET /api/log?account=<id>&zone=<id>&...filters` | Events only (limit controllable via `&limit=`) |
 | `GET /api/export.csv?account=<id>&zone=<id>&...filters` | CSV export of raw events (up to 10 000 rows, `Content-Disposition: attachment`) |
 

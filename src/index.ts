@@ -5,7 +5,8 @@
  *   GET /api/accounts                              → list of configured accounts (id + label)
  *   GET /api/zones?account=<id>                    → list of zones for the given account
  *   GET /api/log?account=<id>&zone=<id>&...        → individual events (firewallEventsAdaptive)
- *   GET /api/stats?account=<id>&zone=<id>&...      → aggregations (firewallEventsAdaptive, client-side grouped)
+ *   GET /api/stats?account=<id>&zone=<id>&...      → WAF aggregations (firewallEventsAdaptive, client-side grouped)
+ *   GET /api/http-stats?account=<id>&zone=<id>&... → HTTP traffic + edge performance (httpRequestsAdaptiveGroups, server-side grouped)
  *   GET /api/export.csv?account=<id>&zone=<id>&... → CSV export of raw events (up to 10 000 rows)
  *
  * Configuration (everything as Worker secrets — nothing in the repo):
@@ -560,6 +561,278 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   );
 }
 
+// ── HTTP traffic analytics (httpRequestsAdaptiveGroups) ─────────────────────────
+// Unlike firewallEventsAdaptiveGroups (Pro+), httpRequestsAdaptiveGroups supports server-side
+// aggregation on the Free plan — so here we let Cloudflare do the grouping and only assemble the
+// chart-ready shape, instead of pulling raw events and counting in JS.
+//
+// Adaptive sampling: a group's count/sum cover only the SAMPLED events; multiplying by that group's
+// avg sampleInterval estimates the true value (sampleInterval is 1 for low-traffic zones, so the
+// scaling is a no-op for small sites and correctly extrapolates for busy ones).
+
+type HttpRange = { zoneTag: string; sinceIso: string; untilIso: string };
+
+function parseHttpRange(url: URL): HttpRange {
+  const zone = url.searchParams.get("zone");
+  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  const now = Date.now();
+  // Normalize to a guaranteed-ISO string (Date.toISOString) so the value is safe to inline into the
+  // GraphQL query literal below — no untrusted characters can reach the query string.
+  const toIso = (v: string | null, fallbackMs: number): string => {
+    const ms = v ? Date.parse(v) : NaN;
+    return new Date(Number.isFinite(ms) ? ms : fallbackMs).toISOString();
+  };
+  return {
+    zoneTag: zone,
+    untilIso: toIso(url.searchParams.get("until"), now),
+    sinceIso: toIso(url.searchParams.get("since"), now - 24 * 60 * 60 * 1000),
+  };
+}
+
+// Time + zone filter as a GraphQL object literal. Values are normalized ISO strings (see above).
+const httpFilter = (r: HttpRange) =>
+  `{ datetime_geq: "${r.sinceIso}", datetime_leq: "${r.untilIso}" }`;
+
+const sampleScale = (g: any): number => g?.avg?.sampleInterval ?? 1;
+
+type HttpGroup = { key: string; requests: number; bytes: number };
+
+/**
+ * One breakdown (group-by single dimension). When `optional` is true a schema mismatch on the
+ * dimension (e.g. a field unavailable on the plan) degrades to an empty array instead of failing
+ * the whole request, so the core breakdowns keep working.
+ */
+async function httpGroupBy(
+  acc: Account,
+  r: HttpRange,
+  dimension: string,
+  opts: { limit?: number; bytes?: boolean; optional?: boolean } = {},
+): Promise<HttpGroup[]> {
+  const { limit = 30, bytes = true, optional = false } = opts;
+  const query = /* GraphQL */ `
+    query HttpGroup($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: ${limit}, orderBy: [count_DESC]) {
+            count
+            avg { sampleInterval }${bytes ? "\n            sum { edgeResponseBytes }" : ""}
+            dimensions { ${dimension} }
+          }
+        }
+      }
+    }
+  `;
+  const run = async (): Promise<HttpGroup[]> => {
+    type Resp = { viewer: { zones: { g: any[] }[] } };
+    const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
+    const groups = data.viewer.zones[0]?.g ?? [];
+    return groups
+      .map((g) => {
+        const s = sampleScale(g);
+        return {
+          key: String(g.dimensions?.[dimension] ?? ""),
+          requests: Math.round((g.count ?? 0) * s),
+          bytes: Math.round((g.sum?.edgeResponseBytes ?? 0) * s),
+        };
+      })
+      .filter((x) => x.key !== "");
+  };
+  if (!optional) return run();
+  try {
+    return await run();
+  } catch {
+    return [];
+  }
+}
+
+type HttpSeriesPoint = { t: string; requests: number; bytes: number; visits: number };
+
+async function httpSeries(acc: Account, r: HttpRange, timeDim: string): Promise<HttpSeriesPoint[]> {
+  const query = /* GraphQL */ `
+    query HttpSeries($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
+            count
+            avg { sampleInterval }
+            sum { edgeResponseBytes visits }
+            dimensions { ${timeDim} }
+          }
+        }
+      }
+    }
+  `;
+  type Resp = { viewer: { zones: { g: any[] }[] } };
+  const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
+  const groups = data.viewer.zones[0]?.g ?? [];
+  return groups.map((g) => {
+    const s = sampleScale(g);
+    return {
+      t: g.dimensions?.[timeDim] as string,
+      requests: Math.round((g.count ?? 0) * s),
+      bytes: Math.round((g.sum?.edgeResponseBytes ?? 0) * s),
+      visits: Math.round((g.sum?.visits ?? 0) * s),
+    };
+  });
+}
+
+type HttpPerf = {
+  ttfbMs: number | null;
+  originMs: number | null;
+  series: { t: string; ttfbMs: number | null; originMs: number | null }[];
+} | null;
+
+/**
+ * Edge/origin timing over time. These avg fields are not available on every plan/dataset version,
+ * so the whole thing is best-effort: any failure returns null and the UI simply hides the panel.
+ */
+async function httpPerf(acc: Account, r: HttpRange, timeDim: string): Promise<HttpPerf> {
+  const query = /* GraphQL */ `
+    query HttpPerf($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
+            count
+            avg { edgeTimeToFirstByteMs originResponseDurationMs }
+            dimensions { ${timeDim} }
+          }
+        }
+      }
+    }
+  `;
+  try {
+    type Resp = { viewer: { zones: { g: any[] }[] } };
+    const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
+    const groups = data.viewer.zones[0]?.g ?? [];
+    const series = groups.map((g) => ({
+      t: g.dimensions?.[timeDim] as string,
+      ttfbMs: (g.avg?.edgeTimeToFirstByteMs ?? null) as number | null,
+      originMs: (g.avg?.originResponseDurationMs ?? null) as number | null,
+      count: (g.count ?? 0) as number,
+    }));
+    // Overall averages weighted by request count (avg of per-bucket averages would bias quiet hours).
+    let wc = 0;
+    let ttfb = 0;
+    let origin = 0;
+    for (const s of series) {
+      wc += s.count;
+      if (s.ttfbMs != null) ttfb += s.ttfbMs * s.count;
+      if (s.originMs != null) origin += s.originMs * s.count;
+    }
+    return {
+      ttfbMs: wc ? ttfb / wc : null,
+      originMs: wc ? origin / wc : null,
+      series: series.map(({ t, ttfbMs, originMs }) => ({ t, ttfbMs, originMs })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// cacheStatus dimension values that count as "served from cache" for the cached-% KPI.
+const CACHED_STATUSES = new Set(["hit", "stale", "revalidated", "updating"]);
+
+async function buildHttpStats(acc: Account, r: HttpRange) {
+  // Minute resolution for short windows, hourly otherwise — both are always-available time dimensions.
+  const hours = (Date.parse(r.untilIso) - Date.parse(r.sinceIso)) / 3_600_000;
+  const timeDim = hours <= 2 ? "datetimeMinute" : "datetimeHour";
+
+  // Core breakdowns must succeed (they back the primary charts); the rest are best-effort.
+  const [
+    series,
+    byCountry,
+    byStatus,
+    byHost,
+    byPath,
+    byContentType,
+    byHttpVersion,
+    byCacheStatus,
+    perf,
+  ] = await Promise.all([
+    httpSeries(acc, r, timeDim),
+    httpGroupBy(acc, r, "clientCountryName", { limit: 50 }),
+    httpGroupBy(acc, r, "edgeResponseStatus", { limit: 50, bytes: false }),
+    httpGroupBy(acc, r, "clientRequestHTTPHost", { limit: 30 }),
+    httpGroupBy(acc, r, "clientRequestPath", { limit: 50 }),
+    httpGroupBy(acc, r, "edgeResponseContentTypeName", { limit: 30, optional: true }),
+    httpGroupBy(acc, r, "clientRequestHTTPProtocol", { limit: 20, bytes: false, optional: true }),
+    httpGroupBy(acc, r, "cacheStatus", { limit: 20, optional: true }),
+    httpPerf(acc, r, timeDim),
+  ]);
+
+  const totals = series.reduce(
+    (a, s) => {
+      a.requests += s.requests;
+      a.bytes += s.bytes;
+      a.visits += s.visits;
+      return a;
+    },
+    { requests: 0, bytes: 0, visits: 0 },
+  );
+
+  let cachedPct: number | null = null;
+  if (byCacheStatus.length) {
+    const all = byCacheStatus.reduce((s, x) => s + x.requests, 0);
+    const cached = byCacheStatus
+      .filter((x) => CACHED_STATUSES.has(x.key.toLowerCase()))
+      .reduce((s, x) => s + x.requests, 0);
+    cachedPct = all ? (cached / all) * 100 : null;
+  }
+
+  return {
+    timeDim,
+    series,
+    byCountry,
+    byStatus,
+    byHost,
+    byPath,
+    byContentType,
+    byHttpVersion,
+    byCacheStatus,
+    perf,
+    totals: { ...totals, cachedPct },
+  };
+}
+
+async function getHttpStats(acc: Account, url: URL): Promise<Response> {
+  const r = parseHttpRange(url);
+  const cache = (caches as unknown as { default?: Cache }).default;
+  const bucket = (iso: string) => {
+    const ms = Date.parse(iso);
+    return Number.isFinite(ms) ? new Date(Math.floor(ms / 300000) * 300000).toISOString() : iso;
+  };
+
+  if (!cache) {
+    const payload = await buildHttpStats(acc, r);
+    return json({ ...payload, cache: "BYPASS" }, { headers: { "x-cache": "BYPASS" } });
+  }
+
+  const keyUrl = new URL("https://waf-cache.internal/http-stats");
+  keyUrl.searchParams.set("acc", acc.id);
+  keyUrl.searchParams.set("zone", r.zoneTag);
+  keyUrl.searchParams.set("from", bucket(r.sinceIso));
+  keyUrl.searchParams.set("to", bucket(r.untilIso));
+  const cacheKey = new Request(keyUrl.toString(), { method: "GET" });
+
+  const hit = await cache.match(cacheKey);
+  if (hit) {
+    const payload = (await hit.json()) as Record<string, unknown>;
+    return json({ ...payload, cache: "HIT" }, { headers: { "x-cache": "HIT" } });
+  }
+
+  const payload = await buildHttpStats(acc, r);
+  await cache.put(
+    cacheKey,
+    new Response(JSON.stringify(payload), {
+      headers: {
+        "content-type": "application/json",
+        "cache-control": `public, max-age=${EVENTS_CACHE_TTL_SECONDS}`,
+      },
+    }),
+  );
+  return json({ ...payload, cache: "MISS" }, { headers: { "x-cache": "MISS" } });
+}
+
 // ── Optional Cloudflare Access verification (defense-in-depth) ──────────────────
 // Enabled only when BOTH CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are set. When enabled, every
 // /api request must carry a valid Access JWT (the Cf-Access-Jwt-Assertion header that Access
@@ -675,6 +948,7 @@ export default {
       if (url.pathname === "/api/zones") return await listZones(account);
       if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
       if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
+      if (url.pathname === "/api/http-stats") return await getHttpStats(account, url);
       if (url.pathname === "/api/export.csv") return await exportCsv(account, parseFilters(url));
 
       return err(404, "not found");
