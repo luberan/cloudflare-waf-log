@@ -7,6 +7,7 @@
  *   GET /api/log?account=<id>&zone=<id>&...        → individual events (firewallEventsAdaptive)
  *   GET /api/stats?account=<id>&zone=<id>&...      → WAF aggregations (firewallEventsAdaptive, client-side grouped)
  *   GET /api/http-stats?account=<id>&zone=<id>&... → HTTP traffic + edge performance (httpRequestsAdaptiveGroups, server-side grouped)
+ *   GET /api/http-settings?account=<id>&zone=<id>   → HTTP dataset limits for the zone (retention / max query window)
  *   GET /api/export.csv?account=<id>&zone=<id>&... → CSV export of raw events (up to 10 000 rows)
  *
  * Configuration (everything as Worker secrets — nothing in the repo):
@@ -833,6 +834,54 @@ async function getHttpStats(acc: Account, url: URL): Promise<Response> {
   return json({ ...payload, cache: "MISS" }, { headers: { "x-cache": "MISS" } });
 }
 
+// Per-zone/plan limits for the HTTP dataset, queried from the GraphQL Settings node. Unlike WAF
+// events (24 h on Free), httpRequestsAdaptiveGroups is retained much longer — and exactly how long
+// depends on the zone's plan, so we ask Cloudflare instead of hard-coding a guess. The dashboard
+// uses this to populate the time-range dropdown with everything the zone is actually allowed to read.
+async function getHttpSettings(acc: Account, url: URL): Promise<Response> {
+  const zone = url.searchParams.get("zone");
+  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  const query = /* GraphQL */ `
+    query HttpSettings($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          settings {
+            httpRequestsAdaptiveGroups {
+              enabled
+              notOlderThan
+              maxDuration
+            }
+          }
+        }
+      }
+    }
+  `;
+  type Resp = {
+    viewer: {
+      zones: {
+        settings: {
+          httpRequestsAdaptiveGroups: {
+            enabled?: boolean;
+            notOlderThan?: number;
+            maxDuration?: number;
+          } | null;
+        };
+      }[];
+    };
+  };
+  const data = await gql<Resp>(acc, query, { zoneTag: zone });
+  const s = data.viewer.zones[0]?.settings?.httpRequestsAdaptiveGroups ?? null;
+  const notOlderThan = Number(s?.notOlderThan) || 0; // seconds we can read back into the past
+  const maxDuration = Number(s?.maxDuration) || 0; // widest single-query window, in seconds
+  // A window ending "now" must fit BOTH limits: width <= maxDuration and start >= now - notOlderThan.
+  const candidates = [notOlderThan, maxDuration].filter((n) => n > 0);
+  const maxRangeSeconds = candidates.length ? Math.min(...candidates) : 0;
+  return json(
+    { enabled: s?.enabled ?? true, notOlderThan, maxDuration, maxRangeSeconds },
+    { headers: { "cache-control": "private, max-age=300" } },
+  );
+}
+
 // ── Optional Cloudflare Access verification (defense-in-depth) ──────────────────
 // Enabled only when BOTH CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are set. When enabled, every
 // /api request must carry a valid Access JWT (the Cf-Access-Jwt-Assertion header that Access
@@ -949,6 +998,7 @@ export default {
       if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
       if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
       if (url.pathname === "/api/http-stats") return await getHttpStats(account, url);
+      if (url.pathname === "/api/http-settings") return await getHttpSettings(account, url);
       if (url.pathname === "/api/export.csv") return await exportCsv(account, parseFilters(url));
 
       return err(404, "not found");

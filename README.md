@@ -6,7 +6,7 @@ Fully functional on the **Free tier** (24 h WAF event retention).
 The UI has two tabs that share the account / zone / time-range selectors:
 
 - **🛡 WAF** — firewall / security events (the original dashboard, see below).
-- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Backed by `httpRequestsAdaptiveGroups`, whose **server-side aggregation works on the Free plan** (no Pro+ needed) and is retained longer than 24 h.
+- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Backed by `httpRequestsAdaptiveGroups`, whose **server-side aggregation works on the Free plan** (no Pro+ needed) and is retained well beyond 24 h. The time-range dropdown is built per-zone from the dataset's real limits (retention / max query window) reported by the GraphQL Settings node, so each plan can look as far back as it is allowed to — not an artificial 24 h cap.
 
 ## Features
 
@@ -20,7 +20,7 @@ The UI has two tabs that share the account / zone / time-range selectors:
   - **country** (ISO2 codes: `US,DE,RU,...`)
   - **ASN** (AS numbers, comma-separated: `13335,15169`)
   - **User-Agent** (exact match)
-- Time range: last **1 / 6 / 24 h** (Free tier — Cloudflare does not retain more than that)
+- Time range (WAF tab): last **1 / 6 / 24 h** (Free tier — Cloudflare does not retain WAF events longer than that)
 - **KPI cards**: total / blocked / challenge / allow+log
 - **Charts**:
   - Stacked time series (events per hour, colour-coded by action)
@@ -55,6 +55,7 @@ The UI has two tabs that share the account / zone / time-range selectors:
 | `GET /api/zones?account=<id>` | List of zones for the given account |
 | `GET /api/stats?account=<id>&zone=<id>&...filters` | WAF aggregations + latest 500 events (everything in a single request) |
 | `GET /api/http-stats?account=<id>&zone=<id>&since=&until=` | HTTP traffic + edge performance aggregations (`httpRequestsAdaptiveGroups`, server-side grouped) |
+| `GET /api/http-settings?account=<id>&zone=<id>` | HTTP dataset limits for the zone (retention + max query window) used to populate the time-range dropdown |
 | `GET /api/log?account=<id>&zone=<id>&...filters` | Events only (limit controllable via `&limit=`) |
 | `GET /api/export.csv?account=<id>&zone=<id>&...filters` | CSV export of raw events (up to 10 000 rows, `Content-Disposition: attachment`) |
 

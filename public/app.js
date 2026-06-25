@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { actions: new Set(), charts: {}, tab: 'waf' };
+const state = { actions: new Set(), charts: {}, tab: 'waf', httpLimits: {}, rangeSel: { waf: '24', http: '24' } };
 let loadSeq = 0;
 
 const PALETTE = ['#e74c3c','#f1c40f','#3498db','#2ecc71','#9b59b6','#1abc9c','#e67e22','#34495e','#ff7675','#74b9ff'];
@@ -263,7 +263,7 @@ async function loadZones() {
     const { zones } = await api('/api/zones?account=' + encodeURIComponent(acc));
     if (!zones.length) { $('#zone').innerHTML = ''; showError('Account has no zones, or the token is missing Zone: Read.'); return; }
     $('#zone').innerHTML = zones.map(z => `<option value="${z.id}">${escapeHtml(z.name)} (${z.plan||'?'})</option>`).join('');
-    await loadActive();
+    await applyTabRangeAndLoad();
   } catch (e) { showError(e.message); }
   finally { $('#refresh').disabled = false; }
 }
@@ -457,7 +457,54 @@ async function loadHttp() {
 
 // ── Tab routing ─────────────────────────────────────────────────────────────
 function loadActive() { return state.tab === 'http' ? loadHttp() : load(); }
+// The range dropdown is shared by both tabs but its options differ: WAF events are only retained
+// 24 h on Free, while HTTP analytics (httpRequestsAdaptiveGroups) reaches back much further — exactly
+// how far is reported per-zone by /api/http-settings, so the HTTP options are built from that.
+const RANGE_OPTIONS = [
+  { h: 1, l: '1 h' }, { h: 6, l: '6 h' }, { h: 24, l: '24 h' },
+  { h: 72, l: '3 d' }, { h: 168, l: '7 d' }, { h: 336, l: '14 d' }, { h: 720, l: '30 d' },
+];
+const WAF_MAX_H = 24;
 
+function setRangeOptions(maxHours, preferValue) {
+  const opts = RANGE_OPTIONS.filter(o => o.h <= maxHours);
+  if (!opts.length) opts.push(RANGE_OPTIONS[2]); // safety net: always offer at least 24 h
+  const sel = $('#range');
+  const want = String(preferValue ?? sel.value ?? '24');
+  sel.innerHTML = opts.map(o => `<option value="${o.h}">${o.l}</option>`).join('');
+  const valid = opts.some(o => String(o.h) === want);
+  sel.value = valid ? want : (opts.some(o => o.h === 24) ? '24' : String(opts[opts.length - 1].h));
+  state.rangeSel[state.tab] = sel.value;
+  sel.title = state.tab === 'http'
+    ? `HTTP analytics for this zone reaches back up to ${opts[opts.length - 1].l}`
+    : 'WAF events are retained 24 h on the Free plan';
+}
+
+// Max selectable HTTP range (hours) for the current zone, from the Settings node. Cached per zone.
+async function fetchHttpLimits() {
+  const acc = $('#account').value, zone = $('#zone').value;
+  if (!acc || !zone) return WAF_MAX_H;
+  const key = acc + '|' + zone;
+  if (state.httpLimits[key] != null) return state.httpLimits[key];
+  try {
+    const s = await api('/api/http-settings?account=' + encodeURIComponent(acc) + '&zone=' + encodeURIComponent(zone));
+    let h = Math.floor((s.maxRangeSeconds || 0) / 3600);
+    if (!h || h < WAF_MAX_H) h = WAF_MAX_H; // always allow at least 24 h
+    state.httpLimits[key] = h;
+    return h;
+  } catch { return WAF_MAX_H; }
+}
+
+// Rebuild the range dropdown for the active tab (HTTP needs an async limits lookup), then load.
+async function applyTabRangeAndLoad() {
+  if (state.tab === 'http') {
+    const maxH = await fetchHttpLimits();
+    setRangeOptions(maxH, state.rangeSel.http);
+  } else {
+    setRangeOptions(WAF_MAX_H, state.rangeSel.waf);
+  }
+  return loadActive();
+}
 function setTab(tab) {
   if (state.tab === tab) return;
   state.tab = tab;
@@ -468,7 +515,7 @@ function setTab(tab) {
   // WAF-only header controls (action chips, filters, Clear/Export) make no sense on the HTTP tab.
   ['wafActions','filtersDetails','wafControls'].forEach(id => { const el = $('#'+id); if (el) el.style.display = isHttp ? 'none' : ''; });
   showError(''); showWarn(''); $('#perf').textContent = '';
-  loadActive();
+  applyTabRangeAndLoad();
 }
 
 async function init() {
@@ -521,8 +568,8 @@ async function init() {
       load();
     });
     $('#account').addEventListener('change', loadZones);
-    $('#zone').addEventListener('change', loadActive);
-    $('#range').addEventListener('change', loadActive);
+    $('#zone').addEventListener('change', applyTabRangeAndLoad);
+    $('#range').addEventListener('change', () => { state.rangeSel[state.tab] = $('#range').value; loadActive(); });
     document.querySelectorAll('#tabs .tab').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
     await loadZones();
   } catch (e) { showError(e.message); }
