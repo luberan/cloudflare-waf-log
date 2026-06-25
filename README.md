@@ -6,7 +6,7 @@ Fully functional on the **Free tier** (24 h WAF event retention).
 The UI has two tabs that share the account / zone / time-range selectors:
 
 - **🛡 WAF** — firewall / security events (the original dashboard, see below).
-- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Backed by `httpRequestsAdaptiveGroups`, whose **server-side aggregation works on the Free plan** (no Pro+ needed) and is retained well beyond 24 h. The time-range dropdown is built per-zone from the dataset's real limits (retention / max query window) reported by the GraphQL Settings node, so each plan can look as far back as it is allowed to — not an artificial 24 h cap.
+- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Numbers are scoped to `requestSource: eyeball` so they line up with Cloudflare's own HTTP Traffic dashboard. Two datasets back it automatically, the same way the Cloudflare dashboard does: short ranges use **`httpRequestsAdaptiveGroups`** (fine-grained, every breakdown; works on the Free plan, no Pro+); longer ranges (up to ~30 d) switch to the **`httpRequests1hGroups` roll-up** (hourly, retained ~30 d). At roll-up ranges the per-path / per-hostname / performance breakdowns aren't available (the panels hide) — that data only exists in the fine-grained dataset. The time-range dropdown is built per-zone from both datasets' real limits (via the GraphQL Settings node).
 
 ## Features
 
