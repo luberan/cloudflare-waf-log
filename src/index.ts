@@ -1014,6 +1014,9 @@ export default {
       const res = await env.ASSETS.fetch(request);
       const headers = new Headers(res.headers);
       for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v);
+      // Always revalidate assets so a redeploy takes effect immediately instead of serving a stale
+      // app.js/index.html from the browser or edge cache (the dashboard is small — 304s are cheap).
+      headers.set("cache-control", "no-cache");
       return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
     }
 
