@@ -465,7 +465,7 @@ async function loadHttp() {
 
     const notes = [];
     if (d.range && d.range.clamped) notes.push('Range limited to the most recent ' + fmtDuration(d.range.effectiveSeconds) + ' (plan limit for this zone).');
-    if (d.dataset === 'rollup') notes.push('Long-range view uses Cloudflare\u2019s hourly roll-up \u2014 Top paths, Top hostnames and Edge performance aren\u2019t available beyond the fine-grained window.');
+    if (d.dataset && d.dataset !== 'adaptive') notes.push('Long-range view uses Cloudflare\u2019s ' + (d.dataset === 'daily' ? 'daily' : 'hourly') + ' roll-up \u2014 Top paths, Top hostnames and Edge performance aren\u2019t available at this range.');
     if (!d.series.length) notes.push('No HTTP traffic in the selected range for this zone.');
     showWarn(notes.join('  '));
   } catch (e) {

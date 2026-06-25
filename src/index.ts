@@ -727,13 +727,19 @@ async function httpPerf(acc: Account, r: HttpRange, timeDim: string): Promise<Ht
 // cacheStatus dimension values that count as "served from cache" for the cached-% KPI.
 const CACHED_STATUSES = new Set(["hit", "stale", "revalidated", "updating"]);
 
-type HttpLimits = { adaptiveMaxSeconds: number; rollupMaxSeconds: number; maxRangeSeconds: number };
+type HttpLimits = {
+  adaptiveMaxSeconds: number;
+  hourlyMaxSeconds: number;
+  dailyMaxSeconds: number;
+  maxRangeSeconds: number;
+};
 
-// Per-zone/plan limits from the GraphQL Settings node, for BOTH datasets we read HTTP traffic from:
-// the fine-grained `httpRequestsAdaptiveGroups` (short window, full breakdowns) and the
-// `httpRequests1hGroups` roll-up (coarser, retained ~30 d — what powers Cloudflare's longer views).
-// adaptiveMaxSeconds decides where we switch from adaptive to roll-up; maxRangeSeconds (the larger of
-// the two) is how far back the range dropdown may offer. Best-effort: zeros on failure.
+// Per-zone/plan limits from the GraphQL Settings node, for the THREE datasets we read HTTP traffic
+// from, in increasing range / decreasing resolution: fine-grained `httpRequestsAdaptiveGroups` (short
+// window, full breakdowns), the hourly roll-up `httpRequests1hGroups`, and the daily roll-up
+// `httpRequests1dGroups` (retained longest — what powers Cloudflare's 30-day views). The per-dataset
+// limits decide where we switch datasets; maxRangeSeconds (the largest) is how far back the range
+// dropdown may offer. Best-effort: zeros on failure.
 async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits> {
   const query = /* GraphQL */ `
     query HttpSettings($zoneTag: String!) {
@@ -742,6 +748,7 @@ async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits
           settings {
             httpRequestsAdaptiveGroups { notOlderThan maxDuration }
             httpRequests1hGroups { notOlderThan maxDuration }
+            httpRequests1dGroups { notOlderThan maxDuration }
           }
         }
       }
@@ -750,7 +757,13 @@ async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits
   type Limit = { notOlderThan?: number; maxDuration?: number } | null;
   type Resp = {
     viewer: {
-      zones: { settings: { httpRequestsAdaptiveGroups: Limit; httpRequests1hGroups: Limit } }[];
+      zones: {
+        settings: {
+          httpRequestsAdaptiveGroups: Limit;
+          httpRequests1hGroups: Limit;
+          httpRequests1dGroups: Limit;
+        };
+      }[];
     };
   };
   // Widest window ending "now" a dataset allows = min(notOlderThan, maxDuration) over its >0 values.
@@ -762,40 +775,46 @@ async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits
     const data = await gql<Resp>(acc, query, { zoneTag: zone });
     const settings = data.viewer.zones[0]?.settings;
     const adaptiveMaxSeconds = usable(settings?.httpRequestsAdaptiveGroups ?? null);
-    const rollupMaxSeconds = usable(settings?.httpRequests1hGroups ?? null);
+    const hourlyMaxSeconds = usable(settings?.httpRequests1hGroups ?? null);
+    const dailyMaxSeconds = usable(settings?.httpRequests1dGroups ?? null);
     return {
       adaptiveMaxSeconds,
-      rollupMaxSeconds,
-      maxRangeSeconds: Math.max(adaptiveMaxSeconds, rollupMaxSeconds),
+      hourlyMaxSeconds,
+      dailyMaxSeconds,
+      maxRangeSeconds: Math.max(adaptiveMaxSeconds, hourlyMaxSeconds, dailyMaxSeconds),
     };
   } catch {
-    return { adaptiveMaxSeconds: 0, rollupMaxSeconds: 0, maxRangeSeconds: 0 };
+    return { adaptiveMaxSeconds: 0, hourlyMaxSeconds: 0, dailyMaxSeconds: 0, maxRangeSeconds: 0 };
   }
 }
 
-// When the Settings node can't tell us the real limits, use sensible defaults: adaptive is good for
-// ~24 h, the roll-up reaches ~30 d. Keeps the feature working even if Settings is unavailable.
+// Defaults when Settings is unavailable: adaptive ~24 h, hourly roll-up ~3 d, daily roll-up ~30 d.
 const HTTP_ADAPTIVE_FALLBACK_SECONDS = 24 * 60 * 60;
-const HTTP_ROLLUP_FALLBACK_SECONDS = 30 * 24 * 60 * 60;
+const HTTP_HOURLY_FALLBACK_SECONDS = 3 * 24 * 60 * 60;
+const HTTP_DAILY_FALLBACK_SECONDS = 30 * 24 * 60 * 60;
 
-// Dispatcher: pick the dataset by how wide the requested window is. Up to the adaptive dataset's
-// limit we use httpRequestsAdaptiveGroups (fine-grained, eyeball-scoped, full breakdowns incl. paths
-// & performance); beyond it we fall back to the httpRequests1hGroups roll-up (hourly, retained ~30 d,
-// the same source Cloudflare's dashboard uses for longer ranges). The window is clamped to whatever
-// the chosen dataset allows, so a too-wide request returns the longest available slice + a note.
+// Dispatcher: pick the dataset by how wide the requested window is, mirroring how Cloudflare's own
+// dashboard switches resolution. Up to the adaptive limit → httpRequestsAdaptiveGroups (fine-grained,
+// eyeball-scoped, every breakdown incl. paths & performance); up to the hourly roll-up's limit →
+// httpRequests1hGroups (hourly); beyond that → httpRequests1dGroups (daily, retained longest, ~30 d).
+// The window is clamped to whatever the chosen dataset allows, so a too-wide request returns the
+// longest available slice + a note.
 async function buildHttpStats(acc: Account, r: HttpRange) {
   const limits = await httpLimitsSeconds(acc, r.zoneTag);
   const adaptiveMax = limits.adaptiveMaxSeconds > 0 ? limits.adaptiveMaxSeconds : HTTP_ADAPTIVE_FALLBACK_SECONDS;
-  const rollupMax = limits.rollupMaxSeconds > 0 ? limits.rollupMaxSeconds : HTTP_ROLLUP_FALLBACK_SECONDS;
-  const maxRangeSeconds = limits.maxRangeSeconds > 0 ? limits.maxRangeSeconds : Math.max(adaptiveMax, rollupMax);
+  const hourlyMax = limits.hourlyMaxSeconds > 0 ? limits.hourlyMaxSeconds : HTTP_HOURLY_FALLBACK_SECONDS;
+  const dailyMax = limits.dailyMaxSeconds > 0 ? limits.dailyMaxSeconds : HTTP_DAILY_FALLBACK_SECONDS;
+  const maxRangeSeconds =
+    limits.maxRangeSeconds > 0 ? limits.maxRangeSeconds : Math.max(adaptiveMax, hourlyMax, dailyMax);
 
   const untilMs = Date.parse(r.untilIso);
   const sinceMs = Date.parse(r.sinceIso);
   const requestedSeconds =
     Number.isFinite(untilMs) && Number.isFinite(sinceMs) ? Math.max(0, Math.round((untilMs - sinceMs) / 1000)) : 0;
 
-  const useRollup = requestedSeconds > adaptiveMax;
-  const effectiveMax = useRollup ? rollupMax : adaptiveMax;
+  const tier: "adaptive" | "hourly" | "daily" =
+    requestedSeconds <= adaptiveMax ? "adaptive" : requestedSeconds <= hourlyMax ? "hourly" : "daily";
+  const effectiveMax = tier === "adaptive" ? adaptiveMax : tier === "hourly" ? hourlyMax : dailyMax;
   let clamped = false;
   if (requestedSeconds > effectiveMax) {
     r = { ...r, sinceIso: new Date(untilMs - effectiveMax * 1000).toISOString() };
@@ -803,10 +822,15 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
   }
   const effectiveSeconds = Math.max(0, Math.round((untilMs - Date.parse(r.sinceIso)) / 1000));
 
-  const body = useRollup ? await buildHttpStatsRollup(acc, r) : await buildHttpStatsAdaptive(acc, r);
+  const body =
+    tier === "adaptive"
+      ? await buildHttpStatsAdaptive(acc, r)
+      : tier === "hourly"
+        ? await buildHttpStatsRollup(acc, r, "httpRequests1hGroups", HOURLY_CONVENTIONS)
+        : await buildHttpStatsRollup(acc, r, "httpRequests1dGroups", DAILY_CONVENTIONS);
   return {
     ...body,
-    dataset: useRollup ? "rollup" : "adaptive",
+    dataset: tier,
     range: { requestedSeconds, effectiveSeconds, clamped, maxRangeSeconds },
   };
 }
@@ -874,24 +898,32 @@ async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
   };
 }
 
-// Longer windows: httpRequests1hGroups roll-up (hourly, ~30 d). `count` is N/A on roll-up tables, so
-// requests come from sum.requests and breakdowns from the pre-aggregated *Map fields. Per-path /
-// per-host / performance aren't in the roll-up, so those return empty (the UI hides those panels).
-const ROLLUP_CONVENTIONS = [
-  { dim: "datetime", filterKey: "datetime" },
-  { dim: "datetimeHour", filterKey: "datetimeHour" },
-] as const;
+// Roll-up datasets (httpRequests1hGroups hourly, httpRequests1dGroups daily). `count` is N/A on
+// roll-up tables, so requests come from sum.requests and breakdowns from the pre-aggregated *Map
+// fields. Per-path / per-host / performance aren't in the roll-up, so those return empty (the UI
+// hides those panels). The time dimension + filter key differ by dataset/schema version, so each
+// builder is given the conventions to try; `dateOnly` trims the filter value to YYYY-MM-DD (the daily
+// dataset filters on a Date, not a DateTime).
+type RollupConv = { dim: string; filterKey: string; dateOnly: boolean };
+const HOURLY_CONVENTIONS: RollupConv[] = [
+  { dim: "datetime", filterKey: "datetime", dateOnly: false },
+  { dim: "datetimeHour", filterKey: "datetimeHour", dateOnly: false },
+];
+const DAILY_CONVENTIONS: RollupConv[] = [{ dim: "date", filterKey: "date", dateOnly: true }];
 
-const rollupFilter = (r: HttpRange, key: string) =>
-  `{ ${key}_geq: "${r.sinceIso}", ${key}_leq: "${r.untilIso}" }`;
+const rollupFilter = (r: HttpRange, conv: RollupConv) => {
+  const v = (iso: string) => (conv.dateOnly ? iso.slice(0, 10) : iso);
+  return `{ ${conv.filterKey}_geq: "${v(r.sinceIso)}", ${conv.filterKey}_leq: "${v(r.untilIso)}" }`;
+};
 
 // One pre-aggregated breakdown map (e.g. countryMap) summed across all timeslots. Best-effort — a
 // schema mismatch on the map/field name returns [] so the rest of the roll-up view keeps working.
 async function rollupMap(
   acc: Account,
   r: HttpRange,
-  filterKey: string,
-  node: string,
+  dataset: string,
+  conv: RollupConv,
+  mapNode: string,
   keyField: string,
   limit: number,
 ): Promise<HttpGroup[]> {
@@ -899,8 +931,8 @@ async function rollupMap(
     query RollupMap($zoneTag: String!) {
       viewer {
         zones(filter: { zoneTag: $zoneTag }) {
-          g: httpRequests1hGroups(filter: ${rollupFilter(r, filterKey)}, limit: 1000) {
-            sum { ${node} { ${keyField} requests } }
+          g: ${dataset}(filter: ${rollupFilter(r, conv)}, limit: 1000) {
+            sum { ${mapNode} { ${keyField} requests } }
           }
         }
       }
@@ -912,7 +944,7 @@ async function rollupMap(
     const groups = data.viewer.zones[0]?.g ?? [];
     const m = new Map<string, number>();
     for (const g of groups) {
-      for (const e of (g.sum?.[node] ?? []) as any[]) {
+      for (const e of (g.sum?.[mapNode] ?? []) as any[]) {
         const k = String(e?.[keyField] ?? "");
         if (k === "") continue;
         m.set(k, (m.get(k) ?? 0) + (Number(e?.requests) || 0));
@@ -927,18 +959,18 @@ async function rollupMap(
   }
 }
 
-async function buildHttpStatsRollup(acc: Account, r: HttpRange) {
-  // The roll-up time dimension differs by Cloudflare schema version (`datetime` vs `datetimeHour`) —
-  // try both so the series query works regardless; reuse whichever worked for the breakdown filters.
+async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string, conventions: RollupConv[]) {
+  // The time dimension + filter key differ by dataset/schema version — try the candidates and reuse
+  // whichever worked for the breakdown queries.
   let series: { t: string; requests: number; bytes: number; visits: number; cached: number }[] = [];
-  let conv: { dim: string; filterKey: string } | null = null;
+  let conv: RollupConv | null = null;
   let lastErr: unknown = null;
-  for (const c of ROLLUP_CONVENTIONS) {
+  for (const c of conventions) {
     const query = /* GraphQL */ `
       query RollupSeries($zoneTag: String!) {
         viewer {
           zones(filter: { zoneTag: $zoneTag }) {
-            g: httpRequests1hGroups(filter: ${rollupFilter(r, c.filterKey)}, limit: 1000, orderBy: [${c.dim}_ASC]) {
+            g: ${dataset}(filter: ${rollupFilter(r, c)}, limit: 1000, orderBy: [${c.dim}_ASC]) {
               dimensions { ${c.dim} }
               sum { requests bytes cachedRequests }
               uniq { uniques }
@@ -985,10 +1017,10 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange) {
     : [];
 
   const [byCountry, byStatus, byContentType, byHttpVersion] = await Promise.all([
-    rollupMap(acc, r, conv.filterKey, "countryMap", "clientCountryName", 50),
-    rollupMap(acc, r, conv.filterKey, "responseStatusMap", "edgeResponseStatus", 50),
-    rollupMap(acc, r, conv.filterKey, "contentTypeMap", "edgeResponseContentTypeName", 30),
-    rollupMap(acc, r, conv.filterKey, "clientHTTPVersionMap", "clientHTTPProtocol", 20),
+    rollupMap(acc, r, dataset, conv, "countryMap", "clientCountryName", 50),
+    rollupMap(acc, r, dataset, conv, "responseStatusMap", "edgeResponseStatus", 50),
+    rollupMap(acc, r, dataset, conv, "contentTypeMap", "edgeResponseContentTypeName", 30),
+    rollupMap(acc, r, dataset, conv, "clientHTTPVersionMap", "clientHTTPProtocol", 20),
   ]);
 
   return {
