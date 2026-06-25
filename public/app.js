@@ -332,8 +332,7 @@ function fmtBytes(n) {
 }
 function fmtDuration(secs) {
   secs = Number(secs) || 0;
-  const d = Math.round(secs / 86400);
-  if (d >= 1) return d + (d === 1 ? ' day' : ' days');
+  if (secs >= 48 * 3600) return Math.round(secs / 86400) + ' days';
   const h = Math.max(1, Math.round(secs / 3600));
   return h + (h === 1 ? ' hour' : ' hours');
 }
@@ -420,6 +419,7 @@ async function loadHttp() {
     const cache = d.cache || '—';
     const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
     $('#perf').textContent = `${dur} ms  ·  ${tag}`;
+    $('#httpWindow').textContent = (d.range && d.range.effectiveSeconds) ? '· last ' + fmtDuration(d.range.effectiveSeconds) : '';
 
     $('#hkpiReq').textContent = fmtNum(d.totals.requests);
     $('#hkpiBytes').textContent = fmtBytes(d.totals.bytes);
