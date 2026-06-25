@@ -727,61 +727,75 @@ async function httpPerf(acc: Account, r: HttpRange, timeDim: string): Promise<Ht
 // cacheStatus dimension values that count as "served from cache" for the cached-% KPI.
 const CACHED_STATUSES = new Set(["hit", "stale", "revalidated", "updating"]);
 
-type HttpLimits = { enabled: boolean; notOlderThan: number; maxDuration: number; maxRangeSeconds: number };
+type HttpLimits = { adaptiveMaxSeconds: number; rollupMaxSeconds: number; maxRangeSeconds: number };
 
-// Per-zone/plan limits for httpRequestsAdaptiveGroups from the GraphQL Settings node. Best-effort:
-// any failure returns zeros so callers fall back to a safe default instead of surfacing a 500.
+// Per-zone/plan limits from the GraphQL Settings node, for BOTH datasets we read HTTP traffic from:
+// the fine-grained `httpRequestsAdaptiveGroups` (short window, full breakdowns) and the
+// `httpRequests1hGroups` roll-up (coarser, retained ~30 d — what powers Cloudflare's longer views).
+// adaptiveMaxSeconds decides where we switch from adaptive to roll-up; maxRangeSeconds (the larger of
+// the two) is how far back the range dropdown may offer. Best-effort: zeros on failure.
 async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits> {
   const query = /* GraphQL */ `
     query HttpSettings($zoneTag: String!) {
       viewer {
         zones(filter: { zoneTag: $zoneTag }) {
           settings {
-            httpRequestsAdaptiveGroups { enabled notOlderThan maxDuration }
+            httpRequestsAdaptiveGroups { notOlderThan maxDuration }
+            httpRequests1hGroups { notOlderThan maxDuration }
           }
         }
       }
     }
   `;
+  type Limit = { notOlderThan?: number; maxDuration?: number } | null;
   type Resp = {
     viewer: {
-      zones: {
-        settings: {
-          httpRequestsAdaptiveGroups:
-            | { enabled?: boolean; notOlderThan?: number; maxDuration?: number }
-            | null;
-        };
-      }[];
+      zones: { settings: { httpRequestsAdaptiveGroups: Limit; httpRequests1hGroups: Limit } }[];
     };
+  };
+  // Widest window ending "now" a dataset allows = min(notOlderThan, maxDuration) over its >0 values.
+  const usable = (s: Limit): number => {
+    const c = [Number(s?.notOlderThan) || 0, Number(s?.maxDuration) || 0].filter((n) => n > 0);
+    return c.length ? Math.min(...c) : 0;
   };
   try {
     const data = await gql<Resp>(acc, query, { zoneTag: zone });
-    const s = data.viewer.zones[0]?.settings?.httpRequestsAdaptiveGroups ?? null;
-    const notOlderThan = Number(s?.notOlderThan) || 0; // how far back we can read (seconds)
-    const maxDuration = Number(s?.maxDuration) || 0; // widest single-query window (seconds)
-    // A window ending "now" must fit BOTH: width <= maxDuration and start >= now - notOlderThan.
-    const candidates = [notOlderThan, maxDuration].filter((n) => n > 0);
-    const maxRangeSeconds = candidates.length ? Math.min(...candidates) : 0;
-    return { enabled: s?.enabled ?? true, notOlderThan, maxDuration, maxRangeSeconds };
+    const settings = data.viewer.zones[0]?.settings;
+    const adaptiveMaxSeconds = usable(settings?.httpRequestsAdaptiveGroups ?? null);
+    const rollupMaxSeconds = usable(settings?.httpRequests1hGroups ?? null);
+    return {
+      adaptiveMaxSeconds,
+      rollupMaxSeconds,
+      maxRangeSeconds: Math.max(adaptiveMaxSeconds, rollupMaxSeconds),
+    };
   } catch {
-    return { enabled: true, notOlderThan: 0, maxDuration: 0, maxRangeSeconds: 0 };
+    return { adaptiveMaxSeconds: 0, rollupMaxSeconds: 0, maxRangeSeconds: 0 };
   }
 }
 
-// When the Settings node can't tell us the real limit, still allow well beyond the 24 h WAF cap —
-// httpRequestsAdaptiveGroups is retained far longer on every plan. 7 days is a conservative width
-// that stays within the dataset's maxDuration, so the stats query won't be rejected as too wide.
-const HTTP_FALLBACK_RANGE_SECONDS = 7 * 24 * 60 * 60;
+// When the Settings node can't tell us the real limits, use sensible defaults: adaptive is good for
+// ~24 h, the roll-up reaches ~30 d. Keeps the feature working even if Settings is unavailable.
+const HTTP_ADAPTIVE_FALLBACK_SECONDS = 24 * 60 * 60;
+const HTTP_ROLLUP_FALLBACK_SECONDS = 30 * 24 * 60 * 60;
 
+// Dispatcher: pick the dataset by how wide the requested window is. Up to the adaptive dataset's
+// limit we use httpRequestsAdaptiveGroups (fine-grained, eyeball-scoped, full breakdowns incl. paths
+// & performance); beyond it we fall back to the httpRequests1hGroups roll-up (hourly, retained ~30 d,
+// the same source Cloudflare's dashboard uses for longer ranges). The window is clamped to whatever
+// the chosen dataset allows, so a too-wide request returns the longest available slice + a note.
 async function buildHttpStats(acc: Account, r: HttpRange) {
-  // Clamp the requested window to what this zone is actually allowed to query in one go, so a wide
-  // range (e.g. 30 d) comes back as the longest available slice instead of failing as too wide.
   const limits = await httpLimitsSeconds(acc, r.zoneTag);
-  const effectiveMax = limits.maxRangeSeconds > 0 ? limits.maxRangeSeconds : HTTP_FALLBACK_RANGE_SECONDS;
+  const adaptiveMax = limits.adaptiveMaxSeconds > 0 ? limits.adaptiveMaxSeconds : HTTP_ADAPTIVE_FALLBACK_SECONDS;
+  const rollupMax = limits.rollupMaxSeconds > 0 ? limits.rollupMaxSeconds : HTTP_ROLLUP_FALLBACK_SECONDS;
+  const maxRangeSeconds = limits.maxRangeSeconds > 0 ? limits.maxRangeSeconds : Math.max(adaptiveMax, rollupMax);
+
   const untilMs = Date.parse(r.untilIso);
   const sinceMs = Date.parse(r.sinceIso);
   const requestedSeconds =
     Number.isFinite(untilMs) && Number.isFinite(sinceMs) ? Math.max(0, Math.round((untilMs - sinceMs) / 1000)) : 0;
+
+  const useRollup = requestedSeconds > adaptiveMax;
+  const effectiveMax = useRollup ? rollupMax : adaptiveMax;
   let clamped = false;
   if (requestedSeconds > effectiveMax) {
     r = { ...r, sinceIso: new Date(untilMs - effectiveMax * 1000).toISOString() };
@@ -789,6 +803,16 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
   }
   const effectiveSeconds = Math.max(0, Math.round((untilMs - Date.parse(r.sinceIso)) / 1000));
 
+  const body = useRollup ? await buildHttpStatsRollup(acc, r) : await buildHttpStatsAdaptive(acc, r);
+  return {
+    ...body,
+    dataset: useRollup ? "rollup" : "adaptive",
+    range: { requestedSeconds, effectiveSeconds, clamped, maxRangeSeconds },
+  };
+}
+
+// Short windows: fine-grained adaptive dataset, scoped to eyeball, with every breakdown.
+async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
   // Minute resolution for short windows, hourly otherwise — both are always-available time dimensions.
   const hours = (Date.parse(r.untilIso) - Date.parse(r.sinceIso)) / 3_600_000;
   const timeDim = hours <= 2 ? "datetimeMinute" : "datetimeHour";
@@ -837,12 +861,6 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
 
   return {
     timeDim,
-    range: {
-      requestedSeconds,
-      effectiveSeconds,
-      clamped,
-      maxRangeSeconds: limits.maxRangeSeconds,
-    },
     series,
     byCountry,
     byStatus,
@@ -853,6 +871,138 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
     byCacheStatus,
     perf,
     totals: { ...totals, cachedPct },
+  };
+}
+
+// Longer windows: httpRequests1hGroups roll-up (hourly, ~30 d). `count` is N/A on roll-up tables, so
+// requests come from sum.requests and breakdowns from the pre-aggregated *Map fields. Per-path /
+// per-host / performance aren't in the roll-up, so those return empty (the UI hides those panels).
+const ROLLUP_CONVENTIONS = [
+  { dim: "datetime", filterKey: "datetime" },
+  { dim: "datetimeHour", filterKey: "datetimeHour" },
+] as const;
+
+const rollupFilter = (r: HttpRange, key: string) =>
+  `{ ${key}_geq: "${r.sinceIso}", ${key}_leq: "${r.untilIso}" }`;
+
+// One pre-aggregated breakdown map (e.g. countryMap) summed across all timeslots. Best-effort — a
+// schema mismatch on the map/field name returns [] so the rest of the roll-up view keeps working.
+async function rollupMap(
+  acc: Account,
+  r: HttpRange,
+  filterKey: string,
+  node: string,
+  keyField: string,
+  limit: number,
+): Promise<HttpGroup[]> {
+  const query = /* GraphQL */ `
+    query RollupMap($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          g: httpRequests1hGroups(filter: ${rollupFilter(r, filterKey)}, limit: 1000) {
+            sum { ${node} { ${keyField} requests } }
+          }
+        }
+      }
+    }
+  `;
+  try {
+    type Resp = { viewer: { zones: { g: any[] }[] } };
+    const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
+    const groups = data.viewer.zones[0]?.g ?? [];
+    const m = new Map<string, number>();
+    for (const g of groups) {
+      for (const e of (g.sum?.[node] ?? []) as any[]) {
+        const k = String(e?.[keyField] ?? "");
+        if (k === "") continue;
+        m.set(k, (m.get(k) ?? 0) + (Number(e?.requests) || 0));
+      }
+    }
+    return [...m.entries()]
+      .map(([key, requests]) => ({ key, requests, bytes: 0 }))
+      .sort((a, b) => b.requests - a.requests)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+async function buildHttpStatsRollup(acc: Account, r: HttpRange) {
+  // The roll-up time dimension differs by Cloudflare schema version (`datetime` vs `datetimeHour`) —
+  // try both so the series query works regardless; reuse whichever worked for the breakdown filters.
+  let series: { t: string; requests: number; bytes: number; visits: number; cached: number }[] = [];
+  let conv: { dim: string; filterKey: string } | null = null;
+  let lastErr: unknown = null;
+  for (const c of ROLLUP_CONVENTIONS) {
+    const query = /* GraphQL */ `
+      query RollupSeries($zoneTag: String!) {
+        viewer {
+          zones(filter: { zoneTag: $zoneTag }) {
+            g: httpRequests1hGroups(filter: ${rollupFilter(r, c.filterKey)}, limit: 1000, orderBy: [${c.dim}_ASC]) {
+              dimensions { ${c.dim} }
+              sum { requests bytes cachedRequests }
+              uniq { uniques }
+            }
+          }
+        }
+      }
+    `;
+    try {
+      type Resp = { viewer: { zones: { g: any[] }[] } };
+      const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
+      const groups = data.viewer.zones[0]?.g ?? [];
+      series = groups.map((g) => ({
+        t: g.dimensions?.[c.dim] as string,
+        requests: Number(g.sum?.requests) || 0,
+        bytes: Number(g.sum?.bytes) || 0,
+        cached: Number(g.sum?.cachedRequests) || 0,
+        visits: Number(g.uniq?.uniques) || 0,
+      }));
+      conv = c;
+      break;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (!conv) throw lastErr ?? new HttpError(502, "roll-up query failed");
+
+  const totals = series.reduce(
+    (a, s) => {
+      a.requests += s.requests;
+      a.bytes += s.bytes;
+      a.visits += s.visits;
+      a.cached += s.cached;
+      return a;
+    },
+    { requests: 0, bytes: 0, visits: 0, cached: 0 },
+  );
+  const cachedPct = totals.requests ? (totals.cached / totals.requests) * 100 : null;
+  const byCacheStatus: HttpGroup[] = totals.requests
+    ? [
+        { key: "cached", requests: totals.cached, bytes: 0 },
+        { key: "uncached", requests: Math.max(0, totals.requests - totals.cached), bytes: 0 },
+      ]
+    : [];
+
+  const [byCountry, byStatus, byContentType, byHttpVersion] = await Promise.all([
+    rollupMap(acc, r, conv.filterKey, "countryMap", "clientCountryName", 50),
+    rollupMap(acc, r, conv.filterKey, "responseStatusMap", "edgeResponseStatus", 50),
+    rollupMap(acc, r, conv.filterKey, "contentTypeMap", "edgeResponseContentTypeName", 30),
+    rollupMap(acc, r, conv.filterKey, "clientHTTPVersionMap", "clientHTTPProtocol", 20),
+  ]);
+
+  return {
+    timeDim: conv.dim,
+    series: series.map(({ t, requests, bytes, visits }) => ({ t, requests, bytes, visits })),
+    byCountry,
+    byStatus,
+    byHost: [] as HttpGroup[],
+    byPath: [] as HttpGroup[],
+    byContentType,
+    byHttpVersion,
+    byCacheStatus,
+    perf: null,
+    totals: { requests: totals.requests, bytes: totals.bytes, visits: totals.visits, cachedPct },
   };
 }
 

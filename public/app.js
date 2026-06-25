@@ -431,10 +431,16 @@ async function loadHttp() {
 
     renderHttpStatusDoughnut(d.byStatus || []);
 
-    const cKeys = (d.byCountry || []).slice(0,15).map(r => r.key || '?');
-    barChart('chartHttpCountry', cKeys, (d.byCountry || []).slice(0,15).map(r=>r.requests), cKeys.map(()=>'#3498db'));
-    const hKeys = (d.byHost || []).slice(0,15).map(r => r.key || '?');
-    barChart('chartHttpHost', hKeys, (d.byHost || []).slice(0,15).map(r=>r.requests), hKeys.map(()=>'#2ecc71'));
+    togglePanel('panelHttpCountry', (d.byCountry || []).length);
+    if ((d.byCountry || []).length) {
+      const cKeys = d.byCountry.slice(0,15).map(r => r.key || '?');
+      barChart('chartHttpCountry', cKeys, d.byCountry.slice(0,15).map(r=>r.requests), cKeys.map(()=>'#3498db'));
+    }
+    togglePanel('panelHttpHost', (d.byHost || []).length);
+    if ((d.byHost || []).length) {
+      const hKeys = d.byHost.slice(0,15).map(r => r.key || '?');
+      barChart('chartHttpHost', hKeys, d.byHost.slice(0,15).map(r=>r.requests), hKeys.map(()=>'#2ecc71'));
+    }
 
     togglePanel('panelHttpCache', d.byCacheStatus && d.byCacheStatus.length);
     if (d.byCacheStatus && d.byCacheStatus.length)
@@ -446,7 +452,8 @@ async function loadHttp() {
     if (d.byHttpVersion && d.byHttpVersion.length)
       doughnut('chartHttpVersion', d.byHttpVersion.map(r=>r.key), d.byHttpVersion.map(r=>r.requests), PALETTE);
 
-    renderHttpPaths(d.byPath || []);
+    togglePanel('panelHttpPath', (d.byPath || []).length);
+    if ((d.byPath || []).length) renderHttpPaths(d.byPath);
     renderHttpStatusTable(d.byStatus || []);
 
     togglePanel('panelHttpPerf', !!d.perf);
@@ -456,11 +463,11 @@ async function loadHttp() {
       perfChart('chartHttpPerf', d.perf.series || [], d.timeDim);
     }
 
-    if (d.range && d.range.clamped) {
-      showWarn('Selected range exceeds this zone\u2019s HTTP-analytics limit \u2014 showing the most recent ' + fmtDuration(d.range.effectiveSeconds) + '.');
-    } else if (!d.series.length) {
-      showWarn('No HTTP traffic in the selected range for this zone.');
-    }
+    const notes = [];
+    if (d.range && d.range.clamped) notes.push('Range limited to the most recent ' + fmtDuration(d.range.effectiveSeconds) + ' (plan limit for this zone).');
+    if (d.dataset === 'rollup') notes.push('Long-range view uses Cloudflare\u2019s hourly roll-up \u2014 Top paths, Top hostnames and Edge performance aren\u2019t available beyond the fine-grained window.');
+    if (!d.series.length) notes.push('No HTTP traffic in the selected range for this zone.');
+    showWarn(notes.join('  '));
   } catch (e) {
     if (seq === loadSeq) showError(e.message);
   } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
