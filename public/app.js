@@ -350,6 +350,36 @@ function statusClass(code) {
 }
 function togglePanel(id, show) { const el = $('#'+id); if (el) el.style.display = show ? '' : 'none'; }
 
+// Re-flow the HTTP breakdown panels by view. Short (adaptive) view packs cache / content / version /
+// by-status-class into one row of quarters. Long (roll-up) view — where hostnames, paths and
+// performance are hidden — arranges the remaining breakdowns into two rows of thirds, reordering via
+// CSS `order` so "status codes" sits next to top countries + cache (col classes keep it responsive).
+function layoutHttpPanels(long) {
+  const set = (id, cols, order) => {
+    const el = $('#' + id); if (!el) return;
+    el.classList.remove('col-3', 'col-4', 'col-6', 'col-8', 'col-12');
+    el.classList.add('col-' + cols);
+    el.style.order = order == null ? '' : String(order);
+  };
+  if (long) {
+    set('panelHttpCountry', 4, 1);
+    set('panelHttpCache', 4, 2);
+    set('panelHttpStatusCodes', 4, 3);
+    set('panelHttpContentType', 4, 4);
+    set('panelHttpVersion', 4, 5);
+    set('panelHttpStatusClass', 4, 6);
+  } else {
+    set('panelHttpCountry', 6, null);
+    set('panelHttpHost', 6, null);
+    set('panelHttpCache', 3, null);
+    set('panelHttpContentType', 3, null);
+    set('panelHttpVersion', 3, null);
+    set('panelHttpStatusClass', 3, null);
+    set('panelHttpPath', 6, null);
+    set('panelHttpStatusCodes', 6, null);
+  }
+}
+
 function comboChart(canvasId, labels, bars, line, barLabel, lineLabel) {
   destroyChart(canvasId);
   state.charts[canvasId] = new Chart($('#'+canvasId), {
@@ -420,6 +450,7 @@ async function loadHttp() {
     const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
     $('#perf').textContent = `${dur} ms  ·  ${tag}`;
     $('#httpWindow').textContent = (d.range && d.range.effectiveSeconds) ? '· last ' + fmtDuration(d.range.effectiveSeconds) : '';
+    layoutHttpPanels(d.dataset && d.dataset !== 'adaptive');
 
     $('#hkpiReq').textContent = fmtNum(d.totals.requests);
     $('#hkpiBytes').textContent = fmtBytes(d.totals.bytes);
