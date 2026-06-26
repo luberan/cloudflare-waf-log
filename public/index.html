@@ -162,18 +162,18 @@
   <section class="panel col-3 stat"><span class="l">Visits</span><span class="v" id="hkpiVisits">–</span></section>
   <section class="panel col-3 stat"><span class="l">Cached</span><span class="v" id="hkpiCached">–</span></section>
 
-  <section class="panel col-8"><h2>Requests &amp; data transfer over time <span class="muted" id="httpWindow"></span></h2><div class="chart-wrap tall"><canvas id="chartHttpSeries"></canvas></div></section>
-  <section class="panel col-4"><h2>By status class</h2><div class="chart-wrap"><canvas id="chartHttpStatus"></canvas></div></section>
+  <section class="panel col-12"><h2>Requests &amp; data transfer over time <span class="muted" id="httpWindow"></span></h2><div class="chart-wrap tall"><canvas id="chartHttpSeries"></canvas></div></section>
 
   <section class="panel col-6" id="panelHttpCountry"><h2>Top countries</h2><div class="chart-wrap"><canvas id="chartHttpCountry"></canvas></div></section>
   <section class="panel col-6" id="panelHttpHost"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHttpHost"></canvas></div></section>
 
-  <section class="panel col-4" id="panelHttpCache"><h2>Cache status</h2><div class="chart-wrap"><canvas id="chartHttpCache"></canvas></div></section>
-  <section class="panel col-4" id="panelHttpContentType"><h2>Content type</h2><div class="chart-wrap"><canvas id="chartHttpContentType"></canvas></div></section>
-  <section class="panel col-4" id="panelHttpVersion"><h2>HTTP version</h2><div class="chart-wrap"><canvas id="chartHttpVersion"></canvas></div></section>
+  <section class="panel col-3" id="panelHttpCache"><h2>Cache status</h2><div class="chart-wrap"><canvas id="chartHttpCache"></canvas></div></section>
+  <section class="panel col-3" id="panelHttpContentType"><h2>Content type</h2><div class="chart-wrap"><canvas id="chartHttpContentType"></canvas></div></section>
+  <section class="panel col-3" id="panelHttpVersion"><h2>HTTP version</h2><div class="chart-wrap"><canvas id="chartHttpVersion"></canvas></div></section>
+  <section class="panel col-3" id="panelHttpStatusClass"><h2>By status class</h2><div class="chart-wrap"><canvas id="chartHttpStatus"></canvas></div></section>
 
   <section class="panel col-6" id="panelHttpPath"><h2>Top paths</h2><div class="scroll"><table id="tblHttpPaths"><thead><tr><th>Path</th><th class="num">Requests</th><th class="num">Data</th></tr></thead><tbody></tbody></table></div></section>
-  <section class="panel col-6"><h2>Status codes</h2><div class="scroll"><table id="tblHttpStatus"><thead><tr><th>Status</th><th class="num">Requests</th></tr></thead><tbody></tbody></table></div></section>
+  <section class="panel col-6" id="panelHttpStatusCodes"><h2>Status codes</h2><div class="scroll"><table id="tblHttpStatus"><thead><tr><th>Status</th><th class="num">Requests</th></tr></thead><tbody></tbody></table></div></section>
 
   <section class="panel col-12" id="panelHttpPerf"><h2>Edge performance <span class="muted">— origin response &amp; edge TTFB (avg ms)</span></h2>
     <div class="row" style="display:flex;gap:2.5rem;margin-bottom:.85rem">
