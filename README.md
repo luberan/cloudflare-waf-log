@@ -6,7 +6,7 @@ Fully functional on the **Free tier** (24 h WAF event retention).
 The UI has two tabs that share the account / zone / time-range selectors:
 
 - **🛡 WAF** — firewall / security events (the original dashboard, see below).
-- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Numbers are scoped to `requestSource: eyeball` so they line up with Cloudflare's own HTTP Traffic dashboard. Two datasets back it automatically, the same way the Cloudflare dashboard does: short ranges use **`httpRequestsAdaptiveGroups`** (fine-grained, every breakdown; works on the Free plan, no Pro+); longer ranges (up to ~30 d) switch to the **`httpRequests1hGroups` roll-up** (hourly, retained ~30 d). At roll-up ranges the per-path / per-hostname / performance breakdowns aren't available (the panels hide) — that data only exists in the fine-grained dataset. The time-range dropdown is built per-zone from both datasets' real limits (via the GraphQL Settings node).
+- **📊 HTTP Traffic** — zone-wide HTTP analytics: requests, data transfer, visits, status codes, cache ratio, top countries / hostnames / paths, content types, HTTP versions, and edge/origin performance (TTFB & origin response time). Numbers are scoped to `requestSource: eyeball` so they line up with Cloudflare's own HTTP Traffic dashboard. Three datasets back it automatically by how wide the range is, the same way the Cloudflare dashboard switches resolution: short ranges (~24 h) use **`httpRequestsAdaptiveGroups`** (fine-grained, every breakdown; works on the Free plan, no Pro+); mid ranges (~3 d) switch to the hourly **`httpRequests1hGroups`** roll-up; long ranges (up to ~30 d) use the daily **`httpRequests1dGroups`** roll-up (retained longest). At roll-up ranges the per-path / per-hostname / performance breakdowns aren't available (the panels hide) — that data only exists in the fine-grained adaptive dataset. The time-range dropdown is built per-zone from all three datasets' real limits (via the GraphQL Settings node).
 
 ## Features
 
@@ -54,7 +54,7 @@ The UI has two tabs that share the account / zone / time-range selectors:
 | `GET /api/accounts` | List of configured accounts (only `id` + `label`, never a token) |
 | `GET /api/zones?account=<id>` | List of zones for the given account |
 | `GET /api/stats?account=<id>&zone=<id>&...filters` | WAF aggregations + latest 500 events (everything in a single request) |
-| `GET /api/http-stats?account=<id>&zone=<id>&since=&until=` | HTTP traffic + edge performance aggregations (`httpRequestsAdaptiveGroups`, server-side grouped) |
+| `GET /api/http-stats?account=<id>&zone=<id>&since=&until=` | HTTP traffic + edge performance aggregations (server-side grouped; `httpRequestsAdaptiveGroups` for short ranges, hourly/daily roll-up for longer ones) |
 | `GET /api/http-settings?account=<id>&zone=<id>` | HTTP dataset limits for the zone (retention + max query window) used to populate the time-range dropdown |
 | `GET /api/log?account=<id>&zone=<id>&...filters` | Events only (limit controllable via `&limit=`) |
 | `GET /api/export.csv?account=<id>&zone=<id>&...filters` | CSV export of raw events (up to 10 000 rows, `Content-Disposition: attachment`) |
