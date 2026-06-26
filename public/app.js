@@ -369,12 +369,12 @@ function layoutHttpPanels(long) {
     set('panelHttpVersion', 4, 5);
     set('panelHttpStatusClass', 4, 6);
   } else {
-    set('panelHttpCountry', 6, null);
-    set('panelHttpHost', 6, null);
-    set('panelHttpCache', 3, null);
-    set('panelHttpContentType', 3, null);
-    set('panelHttpVersion', 3, null);
-    set('panelHttpStatusClass', 3, null);
+    set('panelHttpCountry', 4, null);
+    set('panelHttpHost', 4, null);
+    set('panelHttpContentType', 4, null);
+    set('panelHttpCache', 4, null);
+    set('panelHttpVersion', 4, null);
+    set('panelHttpStatusClass', 4, null);
     set('panelHttpPath', 6, null);
     set('panelHttpStatusCodes', 6, null);
   }
