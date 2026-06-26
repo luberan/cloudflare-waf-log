@@ -858,7 +858,9 @@ async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
     httpGroupBy(acc, r, "edgeResponseStatus", { limit: 50, bytes: false }),
     httpGroupBy(acc, r, "clientRequestHTTPHost", { limit: 30 }),
     httpGroupBy(acc, r, "clientRequestPath", { limit: 50 }),
-    httpGroupBy(acc, r, "edgeResponseContentTypeName", { limit: 30, optional: true }),
+    // Content type is NOT a dimension on httpRequestsAdaptiveGroups — Cloudflare only exposes it via
+    // the roll-up `contentTypeMap` (same as their own dashboard). Pull it from httpRequests1hGroups.
+    rollupMap(acc, r, "httpRequests1hGroups", ROLLUP_DATETIME_CONV, "contentTypeMap", "edgeResponseContentTypeName", 30),
     httpGroupBy(acc, r, "clientRequestHTTPProtocol", { limit: 20, bytes: false, optional: true }),
     httpGroupBy(acc, r, "cacheStatus", { limit: 20, optional: true }),
     httpPerf(acc, r, timeDim),
@@ -905,8 +907,12 @@ async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
 // builder is given the conventions to try; `dateOnly` trims the filter value to YYYY-MM-DD (the daily
 // dataset filters on a Date, not a DateTime).
 type RollupConv = { dim: string; filterKey: string; dateOnly: boolean };
+// Classic roll-up tables (httpRequests1hGroups / 1mGroups) filter on `datetime_geq/leq` with the
+// `datetime` dimension — confirmed by Cloudflare's own prometheus-exporter. Used as the primary
+// convention and for the adaptive view's content-type lookup (which has no adaptive dimension).
+const ROLLUP_DATETIME_CONV: RollupConv = { dim: "datetime", filterKey: "datetime", dateOnly: false };
 const HOURLY_CONVENTIONS: RollupConv[] = [
-  { dim: "datetime", filterKey: "datetime", dateOnly: false },
+  ROLLUP_DATETIME_CONV,
   { dim: "datetimeHour", filterKey: "datetimeHour", dateOnly: false },
 ];
 const DAILY_CONVENTIONS: RollupConv[] = [{ dim: "date", filterKey: "date", dateOnly: true }];
