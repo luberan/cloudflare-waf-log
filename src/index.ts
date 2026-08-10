@@ -8,6 +8,7 @@
  *   GET /api/stats?account=<id>&zone=<id>&...      → WAF aggregations (firewallEventsAdaptive, client-side grouped)
  *   GET /api/http-stats?account=<id>&zone=<id>&... → HTTP traffic + edge performance (httpRequestsAdaptiveGroups, server-side grouped)
  *   GET /api/http-settings?account=<id>&zone=<id>   → HTTP dataset limits for the zone (retention / max query window)
+ *   GET /api/waf-settings?account=<id>&zone=<id>    → WAF dataset limit for the zone
  *   GET /api/export.csv?account=<id>&zone=<id>&... → CSV export of raw events (up to 10 000 rows)
  *
  * Configuration (everything as Worker secrets — nothing in the repo):
@@ -28,15 +29,15 @@
  *   Adding a new account = three new secrets, nothing existing changes.
  *   Token rotation = overwrite just CFACC_<ID>_TOKEN.
  *
- * Access protection: the Worker is meant to sit behind Cloudflare Access. Optionally, setting the
- * env vars CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD turns on in-code Access JWT verification as
- * defense-in-depth (every /api request must then carry a valid Access token).
+ * Access protection: the Worker must sit behind Cloudflare Access. Every production /api request
+ * also requires in-code JWT verification via CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD. Local
+ * development must explicitly set ALLOW_UNAUTHENTICATED_LOCAL_DEV=true.
  */
 
 export interface Env {
   ASSETS: Fetcher;
-  // CFACC_*_LABEL / _ACCOUNT / _TOKEN per account; optionally CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD
-  // to enable in-code Cloudflare Access JWT verification.
+  // CFACC_*_LABEL / _ACCOUNT / _TOKEN per account; CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD in
+  // production; ALLOW_UNAUTHENTICATED_LOCAL_DEV=true only in local .dev.vars.
   [key: string]: unknown;
 }
 
@@ -65,7 +66,7 @@ async function timedFetch(input: string, init: RequestInit = {}): Promise<Respon
   }
 }
 
-type Filters = {
+export type Filters = {
   zoneTag: string;
   datetimeGeq: string;
   datetimeLeq: string;
@@ -79,6 +80,28 @@ type Filters = {
   userAgent?: string[];
   limit?: number;
 };
+
+const MAX_FILTER_VALUES = 100;
+const MAX_FILTER_VALUE_LENGTH = 4096;
+const MAX_ANALYTICS_RANGE_SECONDS = 31 * 24 * 60 * 60;
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+function isoQueryValue(url: URL, name: string, fallbackMs: number): { iso: string; ms: number } {
+  const raw = url.searchParams.get(name);
+  const ms = raw === null ? fallbackMs : Date.parse(raw);
+  if (!Number.isFinite(ms)) throw new HttpError(400, `invalid '${name}' timestamp`);
+  return { iso: new Date(ms).toISOString(), ms };
+}
+
+function validateTimeRange(sinceMs: number, untilMs: number): void {
+  if (sinceMs >= untilMs) throw new HttpError(400, "'since' must be earlier than 'until'");
+  if (untilMs > Date.now() + MAX_FUTURE_SKEW_MS) {
+    throw new HttpError(400, "'until' cannot be in the future");
+  }
+  if ((untilMs - sinceMs) / 1000 > MAX_ANALYTICS_RANGE_SECONDS) {
+    throw new HttpError(400, "requested range exceeds 31 days");
+  }
+}
 
 function json(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -181,46 +204,62 @@ function pickAccount(env: Env, url: URL): Account {
   return acc;
 }
 
-function parseFilters(url: URL): Filters {
+export function parseFilters(url: URL): Filters {
   const zone = url.searchParams.get("zone");
   if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  if (zone.length > 128) throw new HttpError(400, "invalid 'zone' query parameter");
 
-  const now = new Date();
-  const defaultFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const since = url.searchParams.get("since") ?? defaultFrom.toISOString();
-  const until = url.searchParams.get("until") ?? now.toISOString();
+  const now = Date.now();
+  const since = isoQueryValue(url, "since", now - 24 * 60 * 60 * 1000);
+  const until = isoQueryValue(url, "until", now);
+  validateTimeRange(since.ms, until.ms);
 
-  const multi = (name: string) => {
+  const multi = (name: string, splitCommas = true) => {
     const v = url.searchParams
       .getAll(name)
-      .flatMap((s) => s.split(","))
+      .flatMap((s) => (splitCommas ? s.split(",") : [s]))
       .map((s) => s.trim())
       .filter(Boolean);
+    if (v.length > MAX_FILTER_VALUES) {
+      throw new HttpError(400, `too many '${name}' filter values`);
+    }
+    if (v.some((s) => s.length > MAX_FILTER_VALUE_LENGTH)) {
+      throw new HttpError(400, `'${name}' filter value is too long`);
+    }
     return v.length ? v : undefined;
   };
 
   const multiInt = (name: string) => {
-    const v = multi(name)
-      ?.map((s) => Number(s.replace(/^AS/i, "")))
-      .filter((n) => Number.isFinite(n) && n > 0);
-    return v && v.length ? v : undefined;
+    const raw = multi(name);
+    if (!raw) return undefined;
+    const normalized = raw.map((s) => s.replace(/^AS/i, ""));
+    if (normalized.some((value) => !/^\d+$/.test(value))) {
+      throw new HttpError(400, `invalid '${name}' filter value`);
+    }
+    const values = normalized.map(Number);
+    if (values.some((n) => !Number.isSafeInteger(n) || n <= 0 || n > 0xffffffff)) {
+      throw new HttpError(400, `invalid '${name}' filter value`);
+    }
+    return values;
   };
 
-  const limit = Number(url.searchParams.get("limit") ?? "200");
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? 200 : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1) throw new HttpError(400, "invalid 'limit' query parameter");
 
   return {
     zoneTag: zone,
-    datetimeGeq: since,
-    datetimeLeq: until,
+    datetimeGeq: since.iso,
+    datetimeLeq: until.iso,
     action: multi("action"),
     clientCountryName: multi("country"),
     clientRequestHTTPHost: multi("host"),
-    clientRequestPath: multi("path"),
+    clientRequestPath: multi("path", false),
     ruleId: multi("rule"),
     source: multi("source"),
     clientAsn: multiInt("asn"),
-    userAgent: multi("ua"),
-    limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 1000) : 200,
+    userAgent: multi("ua", false),
+    limit: Math.min(limit, 1000),
   };
 }
 
@@ -398,8 +437,9 @@ async function cachedFetchEvents(
 }
 
 async function getEvents(acc: Account, f: Filters): Promise<Response> {
-  const events = await fetchEvents(acc, f, f.limit ?? 200);
-  return json({ events });
+  const prepared = await clampWafFilters(acc, f);
+  const events = await fetchEvents(acc, prepared.filters, prepared.filters.limit ?? 200);
+  return json({ events, range: prepared.range });
 }
 
 const CSV_COLUMNS: { header: string; key: string }[] = [
@@ -427,6 +467,8 @@ function csvEscape(v: unknown): string {
 }
 
 async function exportCsv(acc: Account, f: Filters): Promise<Response> {
+  const prepared = await clampWafFilters(acc, f);
+  f = prepared.filters;
   const events = await fetchEvents(acc, f, 10000);
   const lines = [CSV_COLUMNS.map((c) => c.header).join(",")];
   for (const e of events) {
@@ -444,11 +486,15 @@ async function exportCsv(acc: Account, f: Filters): Promise<Response> {
       "cache-control": "no-store",
       "x-event-count": String(events.length),
       "x-truncated": events.length >= 10000 ? "1" : "0",
+      "x-range-clamped": prepared.range.clamped ? "1" : "0",
+      "x-effective-range-seconds": String(prepared.range.effectiveSeconds),
     },
   });
 }
 
 async function getSummary(acc: Account, f: Filters): Promise<Response> {
+  const prepared = await clampWafFilters(acc, f);
+  f = prepared.filters;
   // Note: on the Free tier `firewallEventsAdaptiveGroups` is NOT available (requires Pro+).
   // So we fetch raw events (limit 10000 = hard limit) and aggregate them here in the Worker.
   //
@@ -478,14 +524,15 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   const fHost = f.clientRequestHTTPHost?.length ? new Set(f.clientRequestHTTPHost) : null;
   const fPath = f.clientRequestPath?.length ? new Set(f.clientRequestPath) : null;
   const fRule = f.ruleId?.length ? new Set(f.ruleId) : null;
-  const fAsn = f.clientAsn?.length ? new Set(f.clientAsn) : null;
+  // Cloudflare serializes clientAsn as a string in raw event rows, while the filter input is UInt32.
+  const fAsn = f.clientAsn?.length ? new Set(f.clientAsn.map(String)) : null;
   const fUa = f.userAgent?.length ? new Set(f.userAgent) : null;
   const matches = (e: any, exclude?: Facet): boolean => {
     if (exclude !== "country" && fCountry && !fCountry.has(e.clientCountryName)) return false;
     if (exclude !== "host" && fHost && !fHost.has(e.clientRequestHTTPHost)) return false;
     if (exclude !== "path" && fPath && !fPath.has(e.clientRequestPath)) return false;
     if (exclude !== "rule" && fRule && !fRule.has(e.ruleId)) return false;
-    if (exclude !== "asn" && fAsn && !fAsn.has(e.clientAsn)) return false;
+    if (exclude !== "asn" && fAsn && !fAsn.has(String(e.clientAsn))) return false;
     if (exclude !== "ua" && fUa && !fUa.has(e.userAgent)) return false;
     return true;
   };
@@ -553,9 +600,18 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
       byUserAgent,
       series,
       events: filtered.slice(0, 500),
+      sampledRows: events.length,
+      matchedSampledRows: filtered.length,
+      sampling: {
+        dataset: "firewallEventsAdaptive",
+        adaptive: true,
+        rowLimitReached: events.length >= 10000,
+      },
+      // Backward-compatible aliases; these are row counts, never estimated event totals.
       totalSampled: events.length,
       totalMatched: filtered.length,
       truncated: events.length >= 10000,
+      range: prepared.range,
       cache: cacheState,
     },
     { headers: { "x-cache": cacheState } },
@@ -575,20 +631,18 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
 
 type HttpRange = { zoneTag: string; sinceIso: string; untilIso: string };
 
-function parseHttpRange(url: URL): HttpRange {
+export function parseHttpRange(url: URL): HttpRange {
   const zone = url.searchParams.get("zone");
   if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  if (zone.length > 128) throw new HttpError(400, "invalid 'zone' query parameter");
   const now = Date.now();
-  // Normalize to a guaranteed-ISO string (Date.toISOString) so the value is safe to inline into the
-  // GraphQL query literal below — no untrusted characters can reach the query string.
-  const toIso = (v: string | null, fallbackMs: number): string => {
-    const ms = v ? Date.parse(v) : NaN;
-    return new Date(Number.isFinite(ms) ? ms : fallbackMs).toISOString();
-  };
+  const until = isoQueryValue(url, "until", now);
+  const since = isoQueryValue(url, "since", now - 24 * 60 * 60 * 1000);
+  validateTimeRange(since.ms, until.ms);
   return {
     zoneTag: zone,
-    untilIso: toIso(url.searchParams.get("until"), now),
-    sinceIso: toIso(url.searchParams.get("since"), now - 24 * 60 * 60 * 1000),
+    untilIso: until.iso,
+    sinceIso: since.iso,
   };
 }
 
@@ -646,29 +700,80 @@ async function httpGroupBy(
 
 type HttpSeriesPoint = { t: string; requests: number; bytes: number; visits: number };
 
-async function httpSeries(acc: Account, r: HttpRange, timeDim: string): Promise<HttpSeriesPoint[]> {
+type HttpCore = {
+  series: HttpSeriesPoint[];
+  byCountry: HttpGroup[];
+  byStatus: HttpGroup[];
+  byHost: HttpGroup[];
+  byPath: HttpGroup[];
+};
+
+async function httpCore(acc: Account, r: HttpRange, timeDim: string): Promise<HttpCore> {
   const query = /* GraphQL */ `
-    query HttpSeries($zoneTag: String!) {
+    query HttpCore($zoneTag: String!) {
       viewer {
         zones(filter: { zoneTag: $zoneTag }) {
-          g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
+          series: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
             count
             sum { edgeResponseBytes visits }
             dimensions { ${timeDim} }
+          }
+          country: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 50, orderBy: [count_DESC]) {
+            count
+            sum { edgeResponseBytes }
+            dimensions { clientCountryName }
+          }
+          status: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 50, orderBy: [count_DESC]) {
+            count
+            dimensions { edgeResponseStatus }
+          }
+          host: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 30, orderBy: [count_DESC]) {
+            count
+            sum { edgeResponseBytes }
+            dimensions { clientRequestHTTPHost }
+          }
+          path: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 50, orderBy: [count_DESC]) {
+            count
+            sum { edgeResponseBytes }
+            dimensions { clientRequestPath }
           }
         }
       }
     }
   `;
-  type Resp = { viewer: { zones: { g: any[] }[] } };
+  type Resp = {
+    viewer: {
+      zones: {
+        series: any[];
+        country: any[];
+        status: any[];
+        host: any[];
+        path: any[];
+      }[];
+    };
+  };
   const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
-  const groups = data.viewer.zones[0]?.g ?? [];
-  return groups.map((g) => ({
-    t: g.dimensions?.[timeDim] as string,
-    requests: Math.round(g.count ?? 0),
-    bytes: Math.round(g.sum?.edgeResponseBytes ?? 0),
-    visits: Math.round(g.sum?.visits ?? 0),
-  }));
+  const zone = data.viewer.zones[0];
+  const mapGroups = (groups: any[] | undefined, dimension: string): HttpGroup[] =>
+    (groups ?? [])
+      .map((g) => ({
+        key: String(g.dimensions?.[dimension] ?? ""),
+        requests: Math.round(g.count ?? 0),
+        bytes: Math.round(g.sum?.edgeResponseBytes ?? 0),
+      }))
+      .filter((g) => g.key !== "");
+  return {
+    series: (zone?.series ?? []).map((g) => ({
+      t: g.dimensions?.[timeDim] as string,
+      requests: Math.round(g.count ?? 0),
+      bytes: Math.round(g.sum?.edgeResponseBytes ?? 0),
+      visits: Math.round(g.sum?.visits ?? 0),
+    })),
+    byCountry: mapGroups(zone?.country, "clientCountryName"),
+    byStatus: mapGroups(zone?.status, "edgeResponseStatus"),
+    byHost: mapGroups(zone?.host, "clientRequestHTTPHost"),
+    byPath: mapGroups(zone?.path, "clientRequestPath"),
+  };
 }
 
 type HttpPerf = {
@@ -686,38 +791,33 @@ async function httpPerf(acc: Account, r: HttpRange, timeDim: string): Promise<Ht
     query HttpPerf($zoneTag: String!) {
       viewer {
         zones(filter: { zoneTag: $zoneTag }) {
-          g: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
-            count
+          series: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 5000, orderBy: [${timeDim}_ASC]) {
             avg { edgeTimeToFirstByteMs originResponseDurationMs }
             dimensions { ${timeDim} }
+          }
+          overall: httpRequestsAdaptiveGroups(filter: ${httpFilter(r)}, limit: 1) {
+            avg { edgeTimeToFirstByteMs originResponseDurationMs }
           }
         }
       }
     }
   `;
   try {
-    type Resp = { viewer: { zones: { g: any[] }[] } };
+    type Resp = { viewer: { zones: { series: any[]; overall: any[] }[] } };
     const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
-    const groups = data.viewer.zones[0]?.g ?? [];
+    const zone = data.viewer.zones[0];
+    const groups = zone?.series ?? [];
     const series = groups.map((g) => ({
       t: g.dimensions?.[timeDim] as string,
       ttfbMs: (g.avg?.edgeTimeToFirstByteMs ?? null) as number | null,
       originMs: (g.avg?.originResponseDurationMs ?? null) as number | null,
-      count: (g.count ?? 0) as number,
     }));
-    // Overall averages weighted by request count (avg of per-bucket averages would bias quiet hours).
-    let wc = 0;
-    let ttfb = 0;
-    let origin = 0;
-    for (const s of series) {
-      wc += s.count;
-      if (s.ttfbMs != null) ttfb += s.ttfbMs * s.count;
-      if (s.originMs != null) origin += s.originMs * s.count;
-    }
+    const overall = zone?.overall?.[0]?.avg;
+    if (!series.length && !overall) return null;
     return {
-      ttfbMs: wc ? ttfb / wc : null,
-      originMs: wc ? origin / wc : null,
-      series: series.map(({ t, ttfbMs, originMs }) => ({ t, ttfbMs, originMs })),
+      ttfbMs: (overall?.edgeTimeToFirstByteMs ?? null) as number | null,
+      originMs: (overall?.originResponseDurationMs ?? null) as number | null,
+      series,
     };
   } catch {
     return null;
@@ -728,11 +828,41 @@ async function httpPerf(acc: Account, r: HttpRange, timeDim: string): Promise<Ht
 const CACHED_STATUSES = new Set(["hit", "stale", "revalidated", "updating"]);
 
 type HttpLimits = {
+  adaptive: DatasetWindow;
+  hourly: DatasetWindow;
+  daily: DatasetWindow;
   adaptiveMaxSeconds: number;
   hourlyMaxSeconds: number;
   dailyMaxSeconds: number;
   maxRangeSeconds: number;
 };
+
+type DatasetLimit = { notOlderThan?: number; maxDuration?: number } | null;
+type DatasetWindow = {
+  notOlderThanSeconds: number;
+  maxDurationSeconds: number;
+  maxRangeSeconds: number;
+};
+type LimitsCacheEntry<T> = { value: T; expiresAt: number };
+const SETTINGS_CACHE_TTL_MS = 5 * 60 * 1000;
+const SETTINGS_FAILURE_TTL_MS = 30 * 1000;
+const httpLimitsCache = new Map<string, LimitsCacheEntry<HttpLimits>>();
+
+function datasetWindow(setting: DatasetLimit): DatasetWindow {
+  const notOlderThanSeconds = Number(setting?.notOlderThan) || 0;
+  const maxDurationSeconds = Number(setting?.maxDuration) || 0;
+  const candidates = [notOlderThanSeconds, maxDurationSeconds].filter((value) => value > 0);
+  const maxRangeSeconds = candidates.length ? Math.min(...candidates) : 0;
+  return {
+    notOlderThanSeconds: notOlderThanSeconds || maxRangeSeconds,
+    maxDurationSeconds: maxDurationSeconds || maxRangeSeconds,
+    maxRangeSeconds,
+  };
+}
+
+function fallbackDatasetWindow(seconds: number): DatasetWindow {
+  return { notOlderThanSeconds: seconds, maxDurationSeconds: seconds, maxRangeSeconds: seconds };
+}
 
 // Per-zone/plan limits from the GraphQL Settings node, for the THREE datasets we read HTTP traffic
 // from, in increasing range / decreasing resolution: fine-grained `httpRequestsAdaptiveGroups` (short
@@ -741,6 +871,10 @@ type HttpLimits = {
 // limits decide where we switch datasets; maxRangeSeconds (the largest) is how far back the range
 // dropdown may offer. Best-effort: zeros on failure.
 async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits> {
+  const cacheKey = `${acc.accountId}:${zone}`;
+  const cached = httpLimitsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
   const query = /* GraphQL */ `
     query HttpSettings($zoneTag: String!) {
       viewer {
@@ -754,44 +888,148 @@ async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits
       }
     }
   `;
-  type Limit = { notOlderThan?: number; maxDuration?: number } | null;
   type Resp = {
     viewer: {
       zones: {
         settings: {
-          httpRequestsAdaptiveGroups: Limit;
-          httpRequests1hGroups: Limit;
-          httpRequests1dGroups: Limit;
+          httpRequestsAdaptiveGroups: DatasetLimit;
+          httpRequests1hGroups: DatasetLimit;
+          httpRequests1dGroups: DatasetLimit;
         };
       }[];
     };
   };
-  // Widest window ending "now" a dataset allows = min(notOlderThan, maxDuration) over its >0 values.
-  const usable = (s: Limit): number => {
-    const c = [Number(s?.notOlderThan) || 0, Number(s?.maxDuration) || 0].filter((n) => n > 0);
-    return c.length ? Math.min(...c) : 0;
-  };
+  let result: HttpLimits;
   try {
     const data = await gql<Resp>(acc, query, { zoneTag: zone });
     const settings = data.viewer.zones[0]?.settings;
-    const adaptiveMaxSeconds = usable(settings?.httpRequestsAdaptiveGroups ?? null);
-    const hourlyMaxSeconds = usable(settings?.httpRequests1hGroups ?? null);
-    const dailyMaxSeconds = usable(settings?.httpRequests1dGroups ?? null);
-    return {
-      adaptiveMaxSeconds,
-      hourlyMaxSeconds,
-      dailyMaxSeconds,
-      maxRangeSeconds: Math.max(adaptiveMaxSeconds, hourlyMaxSeconds, dailyMaxSeconds),
+    const adaptive = datasetWindow(settings?.httpRequestsAdaptiveGroups ?? null);
+    const hourly = datasetWindow(settings?.httpRequests1hGroups ?? null);
+    const daily = datasetWindow(settings?.httpRequests1dGroups ?? null);
+    result = {
+      adaptive,
+      hourly,
+      daily,
+      adaptiveMaxSeconds: adaptive.maxRangeSeconds,
+      hourlyMaxSeconds: hourly.maxRangeSeconds,
+      dailyMaxSeconds: daily.maxRangeSeconds,
+      maxRangeSeconds: Math.max(adaptive.maxRangeSeconds, hourly.maxRangeSeconds, daily.maxRangeSeconds),
     };
   } catch {
-    return { adaptiveMaxSeconds: 0, hourlyMaxSeconds: 0, dailyMaxSeconds: 0, maxRangeSeconds: 0 };
+    const empty = fallbackDatasetWindow(0);
+    result = {
+      adaptive: empty,
+      hourly: empty,
+      daily: empty,
+      adaptiveMaxSeconds: 0,
+      hourlyMaxSeconds: 0,
+      dailyMaxSeconds: 0,
+      maxRangeSeconds: 0,
+    };
   }
+  const ttl = result.maxRangeSeconds > 0 ? SETTINGS_CACHE_TTL_MS : SETTINGS_FAILURE_TTL_MS;
+  httpLimitsCache.set(cacheKey, { value: result, expiresAt: Date.now() + ttl });
+  return result;
+}
+
+type WafLimit = DatasetWindow & { source: "cloudflare" | "fallback" };
+type WafRangeInfo = {
+  requestedSeconds: number;
+  effectiveSeconds: number;
+  clamped: boolean;
+  maxRangeSeconds: number;
+  limitSource: WafLimit["source"];
+};
+const WAF_FALLBACK_SECONDS = 31 * 24 * 60 * 60;
+const wafLimitsCache = new Map<string, LimitsCacheEntry<WafLimit>>();
+
+async function wafLimitSeconds(acc: Account, zone: string): Promise<WafLimit> {
+  const cacheKey = `${acc.accountId}:${zone}`;
+  const cached = wafLimitsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const query = /* GraphQL */ `
+    query WafSettings($zoneTag: String!) {
+      viewer {
+        zones(filter: { zoneTag: $zoneTag }) {
+          settings { firewallEventsAdaptive { notOlderThan maxDuration } }
+        }
+      }
+    }
+  `;
+  type Resp = {
+    viewer: { zones: { settings: { firewallEventsAdaptive: DatasetLimit } }[] };
+  };
+  let value: WafLimit = { ...fallbackDatasetWindow(WAF_FALLBACK_SECONDS), source: "fallback" };
+  try {
+    const data = await gql<Resp>(acc, query, { zoneTag: zone });
+    const window = datasetWindow(data.viewer.zones[0]?.settings?.firewallEventsAdaptive ?? null);
+    if (window.maxRangeSeconds > 0) value = { ...window, source: "cloudflare" };
+  } catch {
+    // Keep the request unchanged when Settings is unavailable; upstream remains the authority.
+  }
+  const ttl = value.source === "cloudflare" ? SETTINGS_CACHE_TTL_MS : SETTINGS_FAILURE_TTL_MS;
+  wafLimitsCache.set(cacheKey, { value, expiresAt: Date.now() + ttl });
+  return value;
+}
+
+async function clampWafFilters(
+  acc: Account,
+  filters: Filters,
+): Promise<{ filters: Filters; range: WafRangeInfo }> {
+  const limit = await wafLimitSeconds(acc, filters.zoneTag);
+  const untilMs = Date.parse(filters.datetimeLeq);
+  const sinceMs = Date.parse(filters.datetimeGeq);
+  const requestedSeconds = Math.round((untilMs - sinceMs) / 1000);
+  if (limit.source === "fallback") {
+    return {
+      filters,
+      range: {
+        requestedSeconds,
+        effectiveSeconds: requestedSeconds,
+        clamped: false,
+        maxRangeSeconds: limit.maxRangeSeconds,
+        limitSource: limit.source,
+      },
+    };
+  }
+  const retentionCutoffMs = Date.now() - limit.notOlderThanSeconds * 1000;
+  if (untilMs < retentionCutoffMs) throw new HttpError(400, "requested WAF range is outside retained data");
+  const effectiveSinceMs = Math.max(
+    sinceMs,
+    retentionCutoffMs,
+    untilMs - limit.maxDurationSeconds * 1000,
+  );
+  const effectiveSeconds = Math.round((untilMs - effectiveSinceMs) / 1000);
+  const clamped = effectiveSinceMs > sinceMs;
+  return {
+    filters: clamped
+      ? { ...filters, datetimeGeq: new Date(effectiveSinceMs).toISOString() }
+      : filters,
+    range: {
+      requestedSeconds,
+      effectiveSeconds,
+      clamped,
+      maxRangeSeconds: limit.maxRangeSeconds,
+      limitSource: limit.source,
+    },
+  };
 }
 
 // Defaults when Settings is unavailable: adaptive ~24 h, hourly roll-up ~3 d, daily roll-up ~30 d.
 const HTTP_ADAPTIVE_FALLBACK_SECONDS = 24 * 60 * 60;
 const HTTP_HOURLY_FALLBACK_SECONDS = 3 * 24 * 60 * 60;
 const HTTP_DAILY_FALLBACK_SECONDS = 30 * 24 * 60 * 60;
+const DAY_SECONDS = 24 * 60 * 60;
+
+export function alignDailyRange(r: HttpRange, effectiveSeconds: number): { range: HttpRange; calendarDays: number } {
+  const calendarDays = Math.max(1, Math.ceil(effectiveSeconds / DAY_SECONDS));
+  const endDayMs = Date.parse(`${r.untilIso.slice(0, 10)}T00:00:00.000Z`);
+  const startDayMs = endDayMs - (calendarDays - 1) * DAY_SECONDS * 1000;
+  return {
+    range: { ...r, sinceIso: new Date(startDayMs).toISOString() },
+    calendarDays,
+  };
+}
 
 // Dispatcher: pick the dataset by how wide the requested window is, mirroring how Cloudflare's own
 // dashboard switches resolution. Up to the adaptive limit → httpRequestsAdaptiveGroups (fine-grained,
@@ -801,26 +1039,59 @@ const HTTP_DAILY_FALLBACK_SECONDS = 30 * 24 * 60 * 60;
 // longest available slice + a note.
 async function buildHttpStats(acc: Account, r: HttpRange) {
   const limits = await httpLimitsSeconds(acc, r.zoneTag);
-  const adaptiveMax = limits.adaptiveMaxSeconds > 0 ? limits.adaptiveMaxSeconds : HTTP_ADAPTIVE_FALLBACK_SECONDS;
-  const hourlyMax = limits.hourlyMaxSeconds > 0 ? limits.hourlyMaxSeconds : HTTP_HOURLY_FALLBACK_SECONDS;
-  const dailyMax = limits.dailyMaxSeconds > 0 ? limits.dailyMaxSeconds : HTTP_DAILY_FALLBACK_SECONDS;
+  const adaptive = limits.adaptive.maxRangeSeconds > 0
+    ? limits.adaptive
+    : fallbackDatasetWindow(HTTP_ADAPTIVE_FALLBACK_SECONDS);
+  const hourly = limits.hourly.maxRangeSeconds > 0
+    ? limits.hourly
+    : fallbackDatasetWindow(HTTP_HOURLY_FALLBACK_SECONDS);
+  const daily = limits.daily.maxRangeSeconds > 0
+    ? limits.daily
+    : fallbackDatasetWindow(HTTP_DAILY_FALLBACK_SECONDS);
   const maxRangeSeconds =
-    limits.maxRangeSeconds > 0 ? limits.maxRangeSeconds : Math.max(adaptiveMax, hourlyMax, dailyMax);
+    limits.maxRangeSeconds > 0
+      ? limits.maxRangeSeconds
+      : Math.max(adaptive.maxRangeSeconds, hourly.maxRangeSeconds, daily.maxRangeSeconds);
 
   const untilMs = Date.parse(r.untilIso);
   const sinceMs = Date.parse(r.sinceIso);
   const requestedSeconds =
     Number.isFinite(untilMs) && Number.isFinite(sinceMs) ? Math.max(0, Math.round((untilMs - sinceMs) / 1000)) : 0;
-
-  const tier: "adaptive" | "hourly" | "daily" =
-    requestedSeconds <= adaptiveMax ? "adaptive" : requestedSeconds <= hourlyMax ? "hourly" : "daily";
-  const effectiveMax = tier === "adaptive" ? adaptiveMax : tier === "hourly" ? hourlyMax : dailyMax;
+  const nowMs = Date.now();
+  const candidates: { tier: "adaptive" | "hourly" | "daily"; window: DatasetWindow }[] = [
+    { tier: "adaptive", window: adaptive },
+    { tier: "hourly", window: hourly },
+    { tier: "daily", window: daily },
+  ];
+  const supports = ({ window }: (typeof candidates)[number]) =>
+    requestedSeconds <= window.maxDurationSeconds &&
+    sinceMs >= nowMs - window.notOlderThanSeconds * 1000;
+  let selected = candidates.find(supports);
   let clamped = false;
-  if (requestedSeconds > effectiveMax) {
-    r = { ...r, sinceIso: new Date(untilMs - effectiveMax * 1000).toISOString() };
-    clamped = true;
+  if (!selected) {
+    const eligible = candidates
+      .filter(({ window }) => untilMs >= nowMs - window.notOlderThanSeconds * 1000)
+      .sort((a, b) => b.window.notOlderThanSeconds - a.window.notOlderThanSeconds);
+    selected = eligible[0];
+    if (!selected) throw new HttpError(400, "requested HTTP range is outside retained data");
+    const earliestMs = Math.max(
+      nowMs - selected.window.notOlderThanSeconds * 1000,
+      untilMs - selected.window.maxDurationSeconds * 1000,
+    );
+    if (earliestMs > sinceMs) {
+      r = { ...r, sinceIso: new Date(earliestMs).toISOString() };
+      clamped = true;
+    }
   }
-  const effectiveSeconds = Math.max(0, Math.round((untilMs - Date.parse(r.sinceIso)) / 1000));
+  const tier = selected.tier;
+  let effectiveSeconds = Math.max(0, Math.round((untilMs - Date.parse(r.sinceIso)) / 1000));
+  let calendarDays: number | null = null;
+  if (tier === "daily") {
+    const aligned = alignDailyRange(r, effectiveSeconds);
+    r = aligned.range;
+    calendarDays = aligned.calendarDays;
+    effectiveSeconds = calendarDays * DAY_SECONDS;
+  }
 
   const body =
     tier === "adaptive"
@@ -831,7 +1102,15 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
   return {
     ...body,
     dataset: tier,
-    range: { requestedSeconds, effectiveSeconds, clamped, maxRangeSeconds },
+    range: {
+      requestedSeconds,
+      effectiveSeconds,
+      clamped,
+      maxRangeSeconds,
+      calendarDays,
+      effectiveSince: r.sinceIso,
+      effectiveUntil: r.untilIso,
+    },
   };
 }
 
@@ -842,22 +1121,8 @@ async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
   const timeDim = hours <= 2 ? "datetimeMinute" : "datetimeHour";
 
   // Core breakdowns must succeed (they back the primary charts); the rest are best-effort.
-  const [
-    series,
-    byCountry,
-    byStatus,
-    byHost,
-    byPath,
-    byContentType,
-    byHttpVersion,
-    byCacheStatus,
-    perf,
-  ] = await Promise.all([
-    httpSeries(acc, r, timeDim),
-    httpGroupBy(acc, r, "clientCountryName", { limit: 50 }),
-    httpGroupBy(acc, r, "edgeResponseStatus", { limit: 50, bytes: false }),
-    httpGroupBy(acc, r, "clientRequestHTTPHost", { limit: 30 }),
-    httpGroupBy(acc, r, "clientRequestPath", { limit: 50 }),
+  const [core, byContentType, byHttpVersion, byCacheStatus, perf] = await Promise.all([
+    httpCore(acc, r, timeDim),
     // Content type is NOT a dimension on httpRequestsAdaptiveGroups — Cloudflare only exposes it via
     // the roll-up `contentTypeMap` (same as their own dashboard). Pull it from httpRequests1hGroups.
     rollupMap(acc, r, "httpRequests1hGroups", ROLLUP_DATETIME_CONV, "contentTypeMap", "edgeResponseContentTypeName", 30),
@@ -865,6 +1130,7 @@ async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
     httpGroupBy(acc, r, "cacheStatus", { limit: 20, optional: true }),
     httpPerf(acc, r, timeDim),
   ]);
+  const { series, byCountry, byStatus, byHost, byPath } = core;
 
   const totals = series.reduce(
     (a, s) => {
@@ -896,7 +1162,7 @@ async function buildHttpStatsAdaptive(acc: Account, r: HttpRange) {
     byHttpVersion,
     byCacheStatus,
     perf,
-    totals: { ...totals, cachedPct },
+    totals: { ...totals, uniqueIps: null, cachedPct },
   };
 }
 
@@ -968,7 +1234,8 @@ async function rollupMap(
 async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string, conventions: RollupConv[]) {
   // The time dimension + filter key differ by dataset/schema version — try the candidates and reuse
   // whichever worked for the breakdown queries.
-  let series: { t: string; requests: number; bytes: number; visits: number; cached: number }[] = [];
+  let series: { t: string; requests: number; bytes: number; cached: number }[] = [];
+  let uniqueIps: number | null = null;
   let conv: RollupConv | null = null;
   let lastErr: unknown = null;
   for (const c of conventions) {
@@ -976,9 +1243,11 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string,
       query RollupSeries($zoneTag: String!) {
         viewer {
           zones(filter: { zoneTag: $zoneTag }) {
-            g: ${dataset}(filter: ${rollupFilter(r, c)}, limit: 1000, orderBy: [${c.dim}_ASC]) {
+            series: ${dataset}(filter: ${rollupFilter(r, c)}, limit: 1000, orderBy: [${c.dim}_ASC]) {
               dimensions { ${c.dim} }
               sum { requests bytes cachedRequests }
+            }
+            total: ${dataset}(filter: ${rollupFilter(r, c)}, limit: 1) {
               uniq { uniques }
             }
           }
@@ -986,16 +1255,18 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string,
       }
     `;
     try {
-      type Resp = { viewer: { zones: { g: any[] }[] } };
+      type Resp = { viewer: { zones: { series: any[]; total: any[] }[] } };
       const data = await gql<Resp>(acc, query, { zoneTag: r.zoneTag });
-      const groups = data.viewer.zones[0]?.g ?? [];
+      const zone = data.viewer.zones[0];
+      const groups = zone?.series ?? [];
       series = groups.map((g) => ({
         t: g.dimensions?.[c.dim] as string,
         requests: Number(g.sum?.requests) || 0,
         bytes: Number(g.sum?.bytes) || 0,
         cached: Number(g.sum?.cachedRequests) || 0,
-        visits: Number(g.uniq?.uniques) || 0,
       }));
+      const rawUniques = zone?.total?.[0]?.uniq?.uniques;
+      uniqueIps = rawUniques == null ? null : Number(rawUniques) || 0;
       conv = c;
       break;
     } catch (e) {
@@ -1008,11 +1279,10 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string,
     (a, s) => {
       a.requests += s.requests;
       a.bytes += s.bytes;
-      a.visits += s.visits;
       a.cached += s.cached;
       return a;
     },
-    { requests: 0, bytes: 0, visits: 0, cached: 0 },
+    { requests: 0, bytes: 0, cached: 0 },
   );
   const cachedPct = totals.requests ? (totals.cached / totals.requests) * 100 : null;
   const byCacheStatus: HttpGroup[] = totals.requests
@@ -1031,7 +1301,7 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string,
 
   return {
     timeDim: conv.dim,
-    series: series.map(({ t, requests, bytes, visits }) => ({ t, requests, bytes, visits })),
+    series: series.map(({ t, requests, bytes }) => ({ t, requests, bytes })),
     byCountry,
     byStatus,
     byHost: [] as HttpGroup[],
@@ -1040,7 +1310,7 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string,
     byHttpVersion,
     byCacheStatus,
     perf: null,
-    totals: { requests: totals.requests, bytes: totals.bytes, visits: totals.visits, cachedPct },
+    totals: { requests: totals.requests, bytes: totals.bytes, visits: null, uniqueIps, cachedPct },
   };
 }
 
@@ -1091,19 +1361,29 @@ async function getHttpSettings(acc: Account, url: URL): Promise<Response> {
   const zone = url.searchParams.get("zone");
   if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
   const limits = await httpLimitsSeconds(acc, zone);
-  return json(limits, { headers: { "cache-control": "private, max-age=300" } });
+  return json(limits, {
+    headers: { "cache-control": limits.maxRangeSeconds > 0 ? "private, max-age=300" : "no-store" },
+  });
 }
 
-// ── Optional Cloudflare Access verification (defense-in-depth) ──────────────────
-// Enabled only when BOTH CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD are set. When enabled, every
-// /api request must carry a valid Access JWT (the Cf-Access-Jwt-Assertion header that Access
-// injects, or the CF_Authorization cookie) — verified against the team's public keys, audience
-// and expiry. When unset, verification is skipped so local `wrangler dev` and network-only Access
-// setups keep working.
+async function getWafSettings(acc: Account, url: URL): Promise<Response> {
+  const zone = url.searchParams.get("zone");
+  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  const limit = await wafLimitSeconds(acc, zone);
+  return json(limit, {
+    headers: { "cache-control": limit.source === "cloudflare" ? "private, max-age=300" : "no-store" },
+  });
+}
+
+// ── Cloudflare Access verification ──────────────────────────────────────────────
+// Production API requests require a valid Access JWT. The only bypass is an explicit development
+// flag on a loopback URL; setting that flag on a deployed Worker cannot disable authentication.
 
 type AccessJwk = { kid?: string; n?: string; e?: string };
-let jwksCache: { keys: AccessJwk[]; exp: number } | null = null;
+type JwksCacheEntry = { keys: AccessJwk[]; exp: number; lastForcedRefreshAt: number };
+const jwksCache = new Map<string, JwksCacheEntry>();
 const JWKS_TTL_MS = 3_600_000;
+const JWKS_UNKNOWN_KID_REFRESH_MS = 60_000;
 
 function b64urlToBytes(s: string): Uint8Array {
   const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
@@ -1117,27 +1397,62 @@ function b64urlToJson<T>(s: string): T {
   return JSON.parse(new TextDecoder().decode(b64urlToBytes(s))) as T;
 }
 
-async function getAccessJwks(teamDomain: string): Promise<AccessJwk[]> {
-  if (jwksCache && jwksCache.exp > Date.now()) return jwksCache.keys;
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  const octets = normalized.split(".");
+  return (
+    octets.length === 4 &&
+    octets[0] === "127" &&
+    octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+  );
+}
+
+async function getAccessJwks(teamDomain: string, refresh = false): Promise<AccessJwk[]> {
+  const now = Date.now();
+  const cached = jwksCache.get(teamDomain);
+  if (cached && cached.exp > now) {
+    if (!refresh || now - cached.lastForcedRefreshAt < JWKS_UNKNOWN_KID_REFRESH_MS) return cached.keys;
+  }
   const res = await timedFetch(`${teamDomain}/cdn-cgi/access/certs`, { method: "GET" });
   if (!res.ok) throw new HttpError(403, "unable to fetch Access signing keys");
   const body = (await res.json()) as { keys?: AccessJwk[] };
   const keys = body.keys ?? [];
-  jwksCache = { keys, exp: Date.now() + JWKS_TTL_MS };
+  jwksCache.set(teamDomain, {
+    keys,
+    exp: now + JWKS_TTL_MS,
+    lastForcedRefreshAt: refresh ? now : cached?.lastForcedRefreshAt ?? 0,
+  });
   return keys;
 }
 
 async function verifyAccess(env: Env, request: Request): Promise<void> {
   const rawTeam = typeof env.CF_ACCESS_TEAM_DOMAIN === "string" ? env.CF_ACCESS_TEAM_DOMAIN.trim() : "";
   const aud = typeof env.CF_ACCESS_AUD === "string" ? env.CF_ACCESS_AUD.trim() : "";
-  if (!rawTeam || !aud) return; // verification not configured → skip
+  const allowLocal =
+    env.ALLOW_UNAUTHENTICATED_LOCAL_DEV === "true" && isLoopbackHostname(new URL(request.url).hostname);
+  if (!rawTeam || !aud) {
+    if (!rawTeam && !aud && allowLocal) return;
+    throw new HttpError(503, "Cloudflare Access verification is not configured");
+  }
 
-  // Normalize: ensure a scheme and strip trailing slashes. A plain loop (not a `/\/+$/` regex)
-  // avoids polynomial backtracking on inputs with many trailing slashes.
-  const withScheme = rawTeam.startsWith("http") ? rawTeam : `https://${rawTeam}`;
-  let end = withScheme.length;
-  while (end > 0 && withScheme[end - 1] === "/") end--;
-  const teamDomain = withScheme.slice(0, end);
+  let teamUrl: URL;
+  try {
+    teamUrl = new URL(rawTeam.includes("://") ? rawTeam : `https://${rawTeam}`);
+  } catch {
+    throw new HttpError(503, "invalid Cloudflare Access team domain");
+  }
+  if (
+    teamUrl.protocol !== "https:" ||
+    teamUrl.username ||
+    teamUrl.password ||
+    (teamUrl.pathname !== "/" && teamUrl.pathname !== "") ||
+    teamUrl.search ||
+    teamUrl.hash
+  ) {
+    throw new HttpError(503, "invalid Cloudflare Access team domain");
+  }
+  const teamDomain = teamUrl.origin;
 
   const fromCookie = (request.headers.get("cookie") ?? "")
     .split(/;\s*/)
@@ -1160,7 +1475,10 @@ async function verifyAccess(env: Env, request: Request): Promise<void> {
   }
   if (header.alg !== "RS256" || !header.kid) throw new HttpError(403, "unsupported Access token");
 
-  const jwk = (await getAccessJwks(teamDomain)).find((k) => k.kid === header.kid);
+  let jwk = (await getAccessJwks(teamDomain)).find((k) => k.kid === header.kid);
+  if (!jwk) {
+    jwk = (await getAccessJwks(teamDomain, true)).find((k) => k.kid === header.kid);
+  }
   if (!jwk?.n || !jwk.e) throw new HttpError(403, "unknown Access signing key");
 
   const key = await crypto.subtle.importKey(
@@ -1214,6 +1532,7 @@ export default {
       if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
       if (url.pathname === "/api/http-stats") return await getHttpStats(account, url);
       if (url.pathname === "/api/http-settings") return await getHttpSettings(account, url);
+      if (url.pathname === "/api/waf-settings") return await getWafSettings(account, url);
       if (url.pathname === "/api/export.csv") return await exportCsv(account, parseFilters(url));
 
       return err(404, "not found");

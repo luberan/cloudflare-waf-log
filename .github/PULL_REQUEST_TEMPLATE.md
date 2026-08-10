@@ -25,7 +25,8 @@ Closes #
 
 <!-- How did you verify this works? -->
 
-- [ ] `npx tsc --noEmit` passes
+- [ ] `npm run check` passes
+- [ ] `npm run deploy:dry-run` passes
 - [ ] Tested locally with `npm run dev` against at least one real Cloudflare account
 - [ ] Dashboard loads without console errors
 - [ ] Affected features were exercised end-to-end (filters, charts, CSV export, …)
