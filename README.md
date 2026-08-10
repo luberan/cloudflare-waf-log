@@ -218,7 +218,7 @@ Without this Wrangler would re-enable the default domains on every deploy, which
 - Tokens have read-only permissions — even a leaked secret cannot change anything in the CF accounts
 - The frontend never receives a token — `GET /api/accounts` returns only `id` + `label`
 - The Worker must sit behind Cloudflare Access, and its API also [requires a valid Access JWT](#required-api-jwt-verification)
-- All assets are served with a strict `Content-Security-Policy` (`script-src 'self' <exact-inline-hash>`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. Application scripts are self-hosted; the hash allows only the exact inline script observed on the protected production hostname, without enabling general `'unsafe-inline'`
+- All assets are served with a strict per-response `Content-Security-Policy` (`script-src 'self' 'nonce-…'`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. Application scripts are self-hosted. Cloudflare Bot JavaScript Detections parses the nonce and adds it to its dynamically injected snippet, without enabling general `'unsafe-inline'`
 - CSV export escapes formula-trigger characters (`= + - @`) to prevent CSV/Excel formula injection, and the download filename is sanitised
 - Upstream calls to the Cloudflare API/GraphQL have a hard timeout, so a stalled upstream returns `504` instead of hanging the Worker
 - `.dev.vars` is listed in [.gitignore](.gitignore)
