@@ -1,6 +1,8 @@
 const $ = (s) => document.querySelector(s);
-const state = { actions: new Set(), charts: {}, tab: 'waf', httpLimits: {}, rangeSel: { waf: '24', http: '24' } };
+const state = { actions: new Set(), charts: {}, tab: 'waf', httpLimits: {}, wafLimits: {}, rangeSel: { waf: '24', http: '24' } };
 let loadSeq = 0;
+let zonesSeq = 0;
+let rangeSeq = 0;
 
 const PALETTE = ['#e74c3c','#f1c40f','#3498db','#2ecc71','#9b59b6','#1abc9c','#e67e22','#34495e','#ff7675','#74b9ff'];
 const ACTION_COLOR = { block:'#e74c3c', managed_challenge:'#f1c40f', jschallenge:'#f39c12', challenge:'#e67e22', allow:'#2ecc71', log:'#3498db', skip:'#9b59b6' };
@@ -21,12 +23,15 @@ function buildQuery() {
   p.set('since', since.toISOString());
   p.set('until', until.toISOString());
   if (state.actions.size) p.set('action', [...state.actions].join(','));
-  const host = $('#hostFilter').value.trim(); if (host) p.set('host', host);
-  const path = $('#pathFilter').value.trim(); if (path) p.set('path', path);
-  const rule = $('#ruleFilter').value.trim(); if (rule) p.set('rule', rule);
-  const country = $('#countryFilter').value.trim(); if (country) p.set('country', country.toUpperCase());
-  const asn = $('#asnFilter').value.trim(); if (asn) p.set('asn', asn);
-  const ua = $('#uaFilter').value.trim(); if (ua) p.set('ua', ua);
+  const appendFilter = (param, inputId, transform) => {
+    for (const value of parseFilterSet(inputId, transform)) p.append(param, value);
+  };
+  appendFilter('host', 'hostFilter');
+  appendFilter('path', 'pathFilter');
+  appendFilter('rule', 'ruleFilter');
+  appendFilter('country', 'countryFilter', value => value.toUpperCase());
+  appendFilter('asn', 'asnFilter', value => value.replace(/^AS/i, ''));
+  appendFilter('ua', 'uaFilter');
   return p.toString();
 }
 
@@ -47,14 +52,17 @@ function showError(msg) { const e = $('#error'); if (msg) { e.textContent = msg;
 function showWarn(msg) { const e = $('#warn'); if (msg) { e.textContent = msg; e.style.display = 'block'; } else e.style.display = 'none'; }
 
 // ── Facet (multi-select) helpers ────────────────────────────────────────────
-// Each filter input holds a comma-separated set of values. Clicking an item in
-// a table/chart adds or removes the value and triggers a reload.
+// Path and User-Agent use one exact value per line because commas are valid data;
+// the shorter facets accept comma- or newline-separated values.
 function parseFilterSet(inputId, transform) {
-  const raw = ($('#'+inputId).value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const exactLines = inputId === 'pathFilter' || inputId === 'uaFilter';
+  const separator = exactLines ? /\r?\n/ : /[,\r\n]+/;
+  const raw = ($('#'+inputId).value || '').split(separator).map(s => s.trim()).filter(Boolean);
   return new Set(transform ? raw.map(transform) : raw);
 }
 function writeFilterSet(inputId, set) {
-  $('#'+inputId).value = [...set].join(',');
+  const exactLines = inputId === 'pathFilter' || inputId === 'uaFilter';
+  $('#'+inputId).value = [...set].join(exactLines ? '\n' : ',');
 }
 function toggleFilter(inputId, value, transform) {
   if (value === undefined || value === null || value === '' || value === '?' || value === '(unknown)') return;
@@ -70,8 +78,7 @@ function updateFiltersBadge() {
   const ids = ['hostFilter','pathFilter','ruleFilter','countryFilter','asnFilter','uaFilter'];
   let n = 0;
   for (const id of ids) {
-    const v = ($('#'+id).value || '').split(',').map(s=>s.trim()).filter(Boolean);
-    n += v.length;
+    n += parseFilterSet(id).size;
   }
   const b = $('#filtersActiveCount');
   if (n > 0) { b.textContent = n; b.style.display = 'inline-block'; }
@@ -86,8 +93,31 @@ function barColors(keys, active, fallback) {
 
 function destroyChart(key) { if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; } }
 
-function barChart(canvasId, labels, values, colors, onPick) {
+function describeChart(canvasId, title, labels, values, formatter = fmtNum) {
+  const details = labels.slice(0, 20).map((label, index) => `${label}: ${formatter(values[index])}`);
+  $('#'+canvasId).setAttribute('aria-label', details.length ? `${title}. ${details.join('; ')}` : `${title}. No data.`);
+}
+
+function renderChartControls(canvasId, labels, values, onPick, active) {
+  const container = $('#'+canvasId+'Controls');
+  if (!container) return;
+  container.replaceChildren();
+  if (!onPick) return;
+  labels.forEach((label, index) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = `${label} (${fmtNum(values[index])})`;
+    button.setAttribute('aria-pressed', String(active?.has(label) || false));
+    button.addEventListener('click', () => onPick(label));
+    container.appendChild(button);
+  });
+}
+
+function barChart(canvasId, labels, values, colors, onPick, active) {
   destroyChart(canvasId);
+  describeChart(canvasId, 'Bar chart', labels, values);
+  renderChartControls(canvasId, labels, values, onPick, active);
   const chart = new Chart($('#'+canvasId), {
     type: 'bar',
     data: { labels, datasets: [{ data: values, backgroundColor: colors || PALETTE, borderWidth: 0 }] },
@@ -145,6 +175,7 @@ function barChart(canvasId, labels, values, colors, onPick) {
 
 function doughnut(canvasId, labels, values, colors) {
   destroyChart(canvasId);
+  describeChart(canvasId, 'Doughnut chart', labels, values);
   state.charts[canvasId] = new Chart($('#'+canvasId), {
     type: 'doughnut',
     data: { labels, datasets: [{ data: values, backgroundColor: colors, borderColor: '#171a21', borderWidth: 2 }] },
@@ -157,6 +188,8 @@ function timeSeries(canvasId, series) {
   // pivot to per-action
   const hours = [...new Set(series.map(s => s.hour))].sort();
   const actions = [...new Set(series.map(s => s.action))];
+  describeChart(canvasId, 'Sampled WAF rows by action over time', actions,
+    actions.map(action => series.filter(point => point.action === action).reduce((sum, point) => sum + point.count, 0)));
   const datasets = actions.map(a => ({
     label: a,
     data: hours.map(h => {
@@ -174,6 +207,22 @@ function timeSeries(canvasId, series) {
   });
 }
 
+function bindToggleRows(tbody, onActivate) {
+  tbody.querySelectorAll('tr').forEach(tr => {
+    tr.tabIndex = 0;
+    tr.setAttribute('role', 'button');
+    tr.setAttribute('aria-pressed', String(tr.classList.contains('active')));
+    const activate = () => onActivate(tr);
+    tr.addEventListener('click', activate);
+    tr.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
 function renderRulesTable(rows) {
   const active = parseFilterSet('ruleFilter');
   const any = active.size > 0;
@@ -183,9 +232,7 @@ function renderRulesTable(rows) {
     const cls = isActive ? 'active' : (any ? 'inactive' : '');
     return `<tr class="row-toggle ${cls}" data-rule="${escapeHtml(r.key)}"><td>${escapeHtml(r.key)}</td><td class="num">${r.count}</td></tr>`;
   }).join('');
-  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    toggleFilter('ruleFilter', tr.dataset.rule);
-  }));
+  bindToggleRows(tbody, tr => toggleFilter('ruleFilter', tr.dataset.rule));
 }
 
 function renderPathsTable(rows) {
@@ -197,9 +244,7 @@ function renderPathsTable(rows) {
     const cls = isActive ? 'active' : (any ? 'inactive' : '');
     return `<tr class="row-toggle ${cls}" data-path="${escapeHtml(r.key)}"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 100 ? r.key.slice(0,100)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`;
   }).join('');
-  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    toggleFilter('pathFilter', tr.dataset.path);
-  }));
+  bindToggleRows(tbody, tr => toggleFilter('pathFilter', tr.dataset.path));
 }
 
 function renderAsnTable(rows) {
@@ -211,26 +256,19 @@ function renderAsnTable(rows) {
     const cls = isActive ? 'active' : (any ? 'inactive' : '');
     return `<tr class="row-toggle ${cls}" data-asn="${escapeHtml(r.key)}"><td>AS${escapeHtml(r.key)}</td><td title="${escapeHtml(r.label||'')}">${escapeHtml((r.label||'').slice(0,60))}</td><td class="num">${r.count}</td></tr>`;
   }).join('');
-  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    toggleFilter('asnFilter', tr.dataset.asn);
-  }));
+  bindToggleRows(tbody, tr => toggleFilter('asnFilter', tr.dataset.asn));
 }
 
 function renderUaTable(rows) {
-  // UA strings may contain commas → use single-select for UA (clicking the same UA clears the filter).
-  const current = $('#uaFilter').value.trim();
-  const any = current.length > 0;
+  const active = parseFilterSet('uaFilter');
+  const any = active.size > 0;
   const tbody = $('#tblUa tbody');
   tbody.innerHTML = rows.slice(0, 50).map(r => {
-    const isActive = current === r.key;
+    const isActive = active.has(r.key);
     const cls = isActive ? 'active' : (any ? 'inactive' : '');
     return `<tr class="row-toggle ${cls}" data-ua="${escapeHtml(r.key)}"><td title="${escapeHtml(r.key)}">${escapeHtml(r.key.length > 120 ? r.key.slice(0,120)+'…' : r.key)}</td><td class="num">${r.count}</td></tr>`;
   }).join('');
-  tbody.querySelectorAll('tr').forEach(tr => tr.addEventListener('click', () => {
-    const v = tr.dataset.ua;
-    $('#uaFilter').value = ($('#uaFilter').value.trim() === v) ? '' : v;
-    load();
-  }));
+  bindToggleRows(tbody, tr => toggleFilter('uaFilter', tr.dataset.ua));
 }
 
 function renderEvents(events) {
@@ -256,16 +294,20 @@ function renderEvents(events) {
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 async function loadZones() {
+  const seq = ++zonesSeq;
+  ++rangeSeq;
+  ++loadSeq;
   const acc = $('#account').value;
   if (!acc) return;
   showError(''); $('#refresh').disabled = true;
   try {
     const { zones } = await api('/api/zones?account=' + encodeURIComponent(acc));
+    if (seq !== zonesSeq || $('#account').value !== acc) return;
     if (!zones.length) { $('#zone').innerHTML = ''; showError('Account has no zones, or the token is missing Zone: Read.'); return; }
-    $('#zone').innerHTML = zones.map(z => `<option value="${z.id}">${escapeHtml(z.name)} (${z.plan||'?'})</option>`).join('');
+    $('#zone').innerHTML = zones.map(z => `<option value="${escapeHtml(z.id)}">${escapeHtml(z.name)} (${escapeHtml(z.plan||'?')})</option>`).join('');
     await applyTabRangeAndLoad();
-  } catch (e) { showError(e.message); }
-  finally { $('#refresh').disabled = false; }
+  } catch (e) { if (seq === zonesSeq) showError(e.message); }
+  finally { if (seq === zonesSeq) $('#refresh').disabled = false; }
 }
 
 async function load() {
@@ -282,6 +324,12 @@ async function load() {
     const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
     $('#perf').textContent = `${dur} ms  ·  ${tag}`;
     const events = { events: summary.events || [] };
+    if (summary.range && summary.range.maxRangeSeconds) {
+      const key = $('#account').value + '|' + $('#zone').value;
+      const maxH = Math.max(1, Math.floor(summary.range.maxRangeSeconds / 3600));
+      if (summary.range.limitSource === 'cloudflare') state.wafLimits[key] = maxH;
+      setRangeOptions(maxH, $('#range').value);
+    }
 
     // KPIs
     const total = summary.byAction.reduce((s, r) => s + r.count, 0);
@@ -297,11 +345,11 @@ async function load() {
     const countryKeys = summary.byCountry.slice(0,15).map(r=>r.key||'?');
     const activeCountry = parseFilterSet('countryFilter');
     barChart('chartCountry', countryKeys, summary.byCountry.slice(0,15).map(r=>r.count),
-      barColors(countryKeys, activeCountry, '#3498db'), (label) => toggleFilter('countryFilter', label));
+      barColors(countryKeys, activeCountry, '#3498db'), (label) => toggleFilter('countryFilter', label), activeCountry);
     const hostKeys = summary.byHost.slice(0,15).map(r=>r.key||'?');
     const activeHost = parseFilterSet('hostFilter');
     barChart('chartHost', hostKeys, summary.byHost.slice(0,15).map(r=>r.count),
-      barColors(hostKeys, activeHost, '#3498db'), (label) => toggleFilter('hostFilter', label));
+      barColors(hostKeys, activeHost, '#3498db'), (label) => toggleFilter('hostFilter', label), activeHost);
     doughnut('chartSource', summary.bySource.map(r=>r.key), summary.bySource.map(r=>r.count), PALETTE);
     renderRulesTable(summary.byRule);
     renderPathsTable(summary.byPath || []);
@@ -309,12 +357,18 @@ async function load() {
     renderUaTable(summary.byUserAgent || []);
     renderEvents(events.events);
     updateFiltersBadge();
-    if (summary.truncated) {
-      const n = (summary.totalSampled || 0).toLocaleString('en-US');
-      showWarn(`\u26A0 Showing a sample — this zone exceeds ${n} events in the selected range, so the statistics are based on the most recent ${n} events.`);
-    } else {
-      showWarn('');
+    const notes = ['Cloudflare may adaptively sample WAF event logs. Counts show returned log rows, not estimated event totals.'];
+    if (summary.sampling?.rowLimitReached || summary.truncated) {
+      const n = (summary.sampledRows ?? summary.totalSampled ?? 0).toLocaleString('en-US');
+      notes.push(`The response also reached its ${n}-row limit, so older sampled rows are omitted.`);
     }
+    if (summary.range?.clamped) {
+      notes.push(`Range limited to the most recent ${fmtDuration(summary.range.effectiveSeconds)} for this zone.`);
+    }
+    if (summary.range?.limitSource === 'fallback') {
+      notes.push('The zone limit lookup was unavailable; the requested range was sent unchanged.');
+    }
+    showWarn(notes.join('  '));
   } catch (e) {
     if (seq === loadSeq) showError(e.message);
   } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
@@ -382,6 +436,9 @@ function layoutHttpPanels(long) {
 
 function comboChart(canvasId, labels, bars, line, barLabel, lineLabel) {
   destroyChart(canvasId);
+  const barTotal = bars.reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const lineTotal = line.reduce((sum, value) => sum + (Number(value) || 0), 0);
+  $('#'+canvasId).setAttribute('aria-label', `${barLabel}: ${fmtNum(barTotal)}. ${lineLabel}: ${fmtBytes(lineTotal)}.`);
   state.charts[canvasId] = new Chart($('#'+canvasId), {
     data: { labels, datasets: [
       { type:'bar', label:barLabel, data:bars, backgroundColor:'#3498db', borderWidth:0, yAxisID:'y', order:2 },
@@ -404,6 +461,10 @@ function comboChart(canvasId, labels, bars, line, barLabel, lineLabel) {
 function perfChart(canvasId, series, dim) {
   destroyChart(canvasId);
   const labels = series.map(s => fmtTimeLabel(s.t, dim));
+  const available = series.filter(point => point.originMs != null || point.ttfbMs != null);
+  $('#'+canvasId).setAttribute('aria-label', available.length
+    ? `Performance chart with ${available.length} time points.`
+    : 'Performance chart. No timing data.');
   state.charts[canvasId] = new Chart($('#'+canvasId), {
     type:'line',
     data:{ labels, datasets:[
@@ -449,12 +510,23 @@ async function loadHttp() {
     const cache = d.cache || '—';
     const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
     $('#perf').textContent = `${dur} ms  ·  ${tag}`;
-    $('#httpWindow').textContent = (d.range && d.range.effectiveSeconds) ? '· last ' + fmtDuration(d.range.effectiveSeconds) : '';
+    if (d.range && d.range.maxRangeSeconds) {
+      const key = $('#account').value + '|' + $('#zone').value;
+      const maxH = Math.max(1, Math.floor(d.range.maxRangeSeconds / 3600));
+      state.httpLimits[key] = maxH;
+      setRangeOptions(maxH, $('#range').value);
+    }
+    $('#httpWindow').textContent = d.range?.calendarDays
+      ? `· ${d.range.calendarDays} calendar days`
+      : (d.range?.effectiveSeconds ? '· last ' + fmtDuration(d.range.effectiveSeconds) : '');
     layoutHttpPanels(d.dataset && d.dataset !== 'adaptive');
 
     $('#hkpiReq').textContent = fmtNum(d.totals.requests);
     $('#hkpiBytes').textContent = fmtBytes(d.totals.bytes);
-    $('#hkpiVisits').textContent = fmtNum(d.totals.visits);
+    const usesUniqueIps = d.totals.visits == null;
+    $('#hkpiVisitsLabel').textContent = usesUniqueIps ? 'Unique IPs' : 'Visits';
+    const visitorValue = usesUniqueIps ? d.totals.uniqueIps : d.totals.visits;
+    $('#hkpiVisits').textContent = visitorValue == null ? '—' : fmtNum(visitorValue);
     $('#hkpiCached').textContent = (d.totals.cachedPct == null) ? '—' : d.totals.cachedPct.toFixed(0) + '%';
 
     const labels = d.series.map(s => fmtTimeLabel(s.t, d.timeDim));
@@ -496,7 +568,7 @@ async function loadHttp() {
 
     const notes = [];
     if (d.range && d.range.clamped) notes.push('Range limited to the most recent ' + fmtDuration(d.range.effectiveSeconds) + ' (plan limit for this zone).');
-    if (d.dataset && d.dataset !== 'adaptive') notes.push('Long-range view uses Cloudflare\u2019s ' + (d.dataset === 'daily' ? 'daily' : 'hourly') + ' roll-up \u2014 Top paths, Top hostnames and Edge performance aren\u2019t available at this range.');
+    if (d.dataset && d.dataset !== 'adaptive') notes.push('Long-range view uses Cloudflare\u2019s ' + (d.dataset === 'daily' ? 'daily calendar-day' : 'hourly') + ' roll-up. The visitor KPI is globally aggregated Unique IPs; Top paths, Top hostnames and Edge performance aren\u2019t available at this range.');
     if (!d.series.length) notes.push('No HTTP traffic in the selected range for this zone.');
     showWarn(notes.join('  '));
   } catch (e) {
@@ -506,14 +578,13 @@ async function loadHttp() {
 
 // ── Tab routing ─────────────────────────────────────────────────────────────
 function loadActive() { return state.tab === 'http' ? loadHttp() : load(); }
-// The range dropdown is shared by both tabs but its options differ: WAF events are only retained
-// 24 h on Free, while HTTP analytics (httpRequestsAdaptiveGroups) reaches back much further — exactly
-// how far is reported per-zone by /api/http-settings, so the HTTP options are built from that.
+// The range dropdown is shared by both tabs. WAF options come from the per-zone Settings endpoint;
+// HTTP starts generous and is refined from the range metadata returned with the first stats load.
 const RANGE_OPTIONS = [
   { h: 1, l: '1 h' }, { h: 6, l: '6 h' }, { h: 24, l: '24 h' },
   { h: 72, l: '3 d' }, { h: 168, l: '7 d' }, { h: 336, l: '14 d' }, { h: 720, l: '30 d' },
 ];
-const WAF_MAX_H = 24;
+const WAF_FALLBACK_MAX_H = 720;
 
 function setRangeOptions(maxHours, preferValue) {
   const opts = RANGE_OPTIONS.filter(o => o.h <= maxHours);
@@ -522,48 +593,62 @@ function setRangeOptions(maxHours, preferValue) {
   const want = String(preferValue ?? sel.value ?? '24');
   sel.innerHTML = opts.map(o => `<option value="${o.h}">${o.l}</option>`).join('');
   const valid = opts.some(o => String(o.h) === want);
-  sel.value = valid ? want : (opts.some(o => o.h === 24) ? '24' : String(opts[opts.length - 1].h));
+  sel.value = valid ? want : String(opts[opts.length - 1].h);
   state.rangeSel[state.tab] = sel.value;
   sel.title = state.tab === 'http'
     ? `HTTP analytics for this zone reaches back up to ${opts[opts.length - 1].l}`
-    : 'WAF events are retained 24 h on the Free plan';
+    : `WAF events for this zone reach back up to ${opts[opts.length - 1].l}`;
 }
 
 // HTTP data is retained well beyond the 24 h WAF cap, so when the Settings lookup can't pin an exact
 // limit we still offer the full set (the backend clamps the actual query to what the plan allows).
 const HTTP_FALLBACK_MAX_H = 720; // 30 d
-async function fetchHttpLimits() {
-  const acc = $('#account').value, zone = $('#zone').value;
-  if (!acc || !zone) return HTTP_FALLBACK_MAX_H;
+async function fetchWafLimits(acc, zone) {
+  if (!acc || !zone) return WAF_FALLBACK_MAX_H;
   const key = acc + '|' + zone;
-  if (state.httpLimits[key] != null) return state.httpLimits[key];
-  let h = HTTP_FALLBACK_MAX_H;
+  if (state.wafLimits[key] != null) return state.wafLimits[key];
+  let h = WAF_FALLBACK_MAX_H;
   try {
-    const s = await api('/api/http-settings?account=' + encodeURIComponent(acc) + '&zone=' + encodeURIComponent(zone));
+    const s = await api('/api/waf-settings?account=' + encodeURIComponent(acc) + '&zone=' + encodeURIComponent(zone));
     const secs = Number(s.maxRangeSeconds) || 0;
-    if (secs >= 3600) h = Math.max(WAF_MAX_H, Math.floor(secs / 3600));
-  } catch { /* keep the generous fallback */ }
-  state.httpLimits[key] = h;
+    if (secs >= 3600) h = Math.max(1, Math.floor(secs / 3600));
+    if (s.source === 'cloudflare') state.wafLimits[key] = h;
+  } catch { /* keep the generous, non-sticky fallback */ }
   return h;
 }
 
 // Rebuild the range dropdown for the active tab (HTTP needs an async limits lookup), then load.
 async function applyTabRangeAndLoad() {
-  if (state.tab === 'http') {
-    const maxH = await fetchHttpLimits();
-    setRangeOptions(maxH, state.rangeSel.http);
+  const seq = ++rangeSeq;
+  ++loadSeq;
+  const tab = state.tab;
+  const acc = $('#account').value;
+  const zone = $('#zone').value;
+  if (!acc || !zone) return;
+  if (tab === 'http') {
+    const key = acc + '|' + zone;
+    setRangeOptions(state.httpLimits[key] || HTTP_FALLBACK_MAX_H, state.rangeSel.http);
   } else {
-    setRangeOptions(WAF_MAX_H, state.rangeSel.waf);
+    const maxH = await fetchWafLimits(acc, zone);
+    if (seq !== rangeSeq || state.tab !== tab || $('#account').value !== acc || $('#zone').value !== zone) return;
+    setRangeOptions(maxH, state.rangeSel.waf);
   }
+  if (seq !== rangeSeq || state.tab !== tab || $('#account').value !== acc || $('#zone').value !== zone) return;
   return loadActive();
 }
 function setTab(tab) {
   if (state.tab === tab) return;
+  ++loadSeq;
   state.tab = tab;
-  document.querySelectorAll('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('#tabs .tab').forEach(b => {
+    const selected = b.dataset.tab === tab;
+    b.classList.toggle('active', selected);
+    b.setAttribute('aria-selected', String(selected));
+    b.tabIndex = selected ? 0 : -1;
+  });
   const isHttp = tab === 'http';
-  $('#view-waf').style.display = isHttp ? 'none' : '';
-  $('#view-http').style.display = isHttp ? '' : 'none';
+  $('#view-waf').hidden = isHttp;
+  $('#view-http').hidden = !isHttp;
   // WAF-only header controls (action chips, filters, Clear/Export) make no sense on the HTTP tab.
   ['wafActions','filtersDetails','wafControls'].forEach(id => { const el = $('#'+id); if (el) el.style.display = isHttp ? 'none' : ''; });
   showError(''); showWarn(''); $('#perf').textContent = '';
@@ -580,6 +665,7 @@ async function init() {
         const a = chip.dataset.action;
         if (state.actions.has(a)) state.actions.delete(a); else state.actions.add(a);
         chip.classList.toggle('active');
+        chip.setAttribute('aria-pressed', String(state.actions.has(a)));
       });
     });
     $('#refresh').addEventListener('click', loadActive);
@@ -614,7 +700,10 @@ async function init() {
     });
     $('#clearFilters').addEventListener('click', () => {
       state.actions.clear();
-      document.querySelectorAll('#actionChips .chip.active').forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('#actionChips .chip').forEach(c => {
+        c.classList.remove('active');
+        c.setAttribute('aria-pressed', 'false');
+      });
       ['hostFilter','pathFilter','ruleFilter','countryFilter','asnFilter','uaFilter'].forEach(id => $('#'+id).value = '');
       updateFiltersBadge();
       load();
@@ -622,7 +711,18 @@ async function init() {
     $('#account').addEventListener('change', loadZones);
     $('#zone').addEventListener('change', applyTabRangeAndLoad);
     $('#range').addEventListener('change', () => { state.rangeSel[state.tab] = $('#range').value; loadActive(); });
-    document.querySelectorAll('#tabs .tab').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+    const tabs = [...document.querySelectorAll('#tabs .tab')];
+    tabs.forEach((button, index) => {
+      button.addEventListener('click', () => setTab(button.dataset.tab));
+      button.addEventListener('keydown', event => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const direction = event.key === 'ArrowRight' ? 1 : -1;
+        const next = tabs[(index + direction + tabs.length) % tabs.length];
+        setTab(next.dataset.tab);
+        next.focus();
+      });
+    });
     await loadZones();
   } catch (e) { showError(e.message); }
 }

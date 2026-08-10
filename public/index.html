@@ -11,14 +11,15 @@
     --accent: #f6821f; --ok: #2ecc71; --warn: #f1c40f; --bad: #e74c3c; --info: #3498db;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
   header { background: var(--panel); border-bottom: 1px solid var(--border); padding: .85rem 1.25rem; display: flex; flex-direction: column; gap: .75rem; font-size: 15px; }
   header .row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
   header h1 { font-size: 1.25rem; margin: 0; font-weight: 600; white-space: nowrap; }
   header .grow { flex: 1; }
   header label { color: var(--muted); display: inline-flex; align-items: center; gap: .45rem; font-size: 14px; }
-  header label input, header label select { color: var(--fg); }
-  header select, header input, header button { padding: .5rem .7rem; font-size: 14px; }
+  header label input, header label select, header label textarea { color: var(--fg); }
+  header select, header input, header textarea, header button { padding: .5rem .7rem; font-size: 14px; }
   header button { font-size: 14px; }
   details.filters-bar { background: #0c0e13; border: 1px solid var(--border); border-radius: 8px; padding: 0; }
   details.filters-bar > summary { list-style: none; cursor: pointer; padding: .6rem .9rem; color: var(--muted); font-size: 14px; display: flex; align-items: center; gap: .6rem; user-select: none; }
@@ -28,9 +29,10 @@
   details.filters-bar > summary .badge-count { background: var(--accent); color: #000; font-weight: 600; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; }
   details.filters-bar .filters-grid { padding: .25rem .9rem .85rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: .65rem .9rem; }
   details.filters-bar .filters-grid label { display: flex; flex-direction: column; gap: .3rem; font-size: 13px; color: var(--muted); }
-  details.filters-bar .filters-grid input { width: 100%; padding: .5rem .65rem; font-size: 14px; }
+  details.filters-bar .filters-grid input, details.filters-bar .filters-grid textarea { width: 100%; padding: .5rem .65rem; font-size: 14px; }
   .chip { font-size: 13px !important; padding: 4px 12px !important; }
-  select, input, button { background: #0c0e13; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: .4rem .55rem; font: inherit; }
+  select, input, textarea, button { background: #0c0e13; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: .4rem .55rem; font: inherit; }
+  textarea { resize: vertical; min-height: 2.5rem; }
   button { cursor: pointer; }
   button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
   button:disabled { opacity: .5; cursor: not-allowed; }
@@ -75,15 +77,18 @@
   .b-status-4xx { background: rgba(241,196,15,.15); color: #ffd84d; }
   .b-status-5xx { background: rgba(231,76,60,.15); color: #ff7a6b; }
   .b-status-other { background: rgba(155,89,182,.15); color: #c39bd3; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  .chart-a11y-controls { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+  .chart-a11y-controls:focus-within { position: static; width: auto; height: auto; margin: .5rem 0 0; overflow: visible; clip: auto; white-space: normal; display: flex; flex-wrap: wrap; gap: .35rem; }
 </style>
 </head>
 <body>
 <header>
   <div class="row">
     <h1>☁ Cloudflare <span id="perf" class="muted" style="font-size:12.5px;font-weight:400;margin-left:.5rem"></span></h1>
-    <div class="tabs" id="tabs">
-      <button class="tab active" data-tab="waf">🛡 WAF</button>
-      <button class="tab" data-tab="http">📊 HTTP Traffic</button>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Dashboard view">
+      <button id="tab-waf" class="tab active" type="button" role="tab" aria-selected="true" aria-controls="view-waf" data-tab="waf">🛡 WAF</button>
+      <button id="tab-http" class="tab" type="button" role="tab" aria-selected="false" aria-controls="view-http" tabindex="-1" data-tab="http">📊 HTTP Traffic</button>
     </div>
     <label>Account: <select id="account"></select></label>
     <label>Zone: <select id="zone"></select></label>
@@ -104,44 +109,44 @@
   <div class="row" id="wafActions" style="gap:.5rem">
     <span class="muted" style="font-size:11.5px;text-transform:uppercase;letter-spacing:.04em">Action:</span>
     <div class="row-actions" id="actionChips">
-      <span class="chip" data-action="block">block</span>
-      <span class="chip" data-action="managed_challenge">managed_challenge</span>
-      <span class="chip" data-action="jschallenge">jschallenge</span>
-      <span class="chip" data-action="challenge">challenge</span>
-      <span class="chip" data-action="allow">allow</span>
-      <span class="chip" data-action="log">log</span>
-      <span class="chip" data-action="skip">skip</span>
+      <button type="button" class="chip" aria-pressed="false" data-action="block">block</button>
+      <button type="button" class="chip" aria-pressed="false" data-action="managed_challenge">managed_challenge</button>
+      <button type="button" class="chip" aria-pressed="false" data-action="jschallenge">jschallenge</button>
+      <button type="button" class="chip" aria-pressed="false" data-action="challenge">challenge</button>
+      <button type="button" class="chip" aria-pressed="false" data-action="allow">allow</button>
+      <button type="button" class="chip" aria-pressed="false" data-action="log">log</button>
+      <button type="button" class="chip" aria-pressed="false" data-action="skip">skip</button>
     </div>
   </div>
   <details class="filters-bar" id="filtersDetails">
     <summary>Filters <span id="filtersActiveCount" class="badge-count" style="display:none">0</span><span class="muted" style="margin-left:auto;font-size:11px">click to expand</span></summary>
     <div class="filters-grid">
       <label>Host <input id="hostFilter" type="text" placeholder="www.example.com" /></label>
-      <label>Path <input id="pathFilter" type="text" placeholder="/wp-login.php" /></label>
+      <label>Path <textarea id="pathFilter" rows="2" placeholder="One exact path per line"></textarea></label>
       <label>Rule ID <input id="ruleFilter" type="text" placeholder="uuid,uuid" /></label>
       <label>Country <input id="countryFilter" type="text" placeholder="US,DE" /></label>
       <label>ASN <input id="asnFilter" type="text" placeholder="13335,15169" /></label>
-      <label>User-Agent <input id="uaFilter" type="text" placeholder="exact UA match" /></label>
+      <label>User-Agent <textarea id="uaFilter" rows="2" placeholder="One exact User-Agent per line"></textarea></label>
     </div>
   </details>
 </header>
 
-<div id="error" class="err" style="display:none;margin:1rem"></div>
-<div id="warn" class="warn" style="display:none;margin:1rem"></div>
+<div id="error" class="err" role="alert" style="display:none;margin:1rem"></div>
+<div id="warn" class="warn" role="status" aria-live="polite" style="display:none;margin:1rem"></div>
 
-<main id="view-waf">
-  <section class="panel col-3 stat"><span class="l">Total events</span><span class="v" id="kpiTotal">–</span></section>
+<main id="view-waf" role="tabpanel" aria-labelledby="tab-waf">
+  <section class="panel col-3 stat"><span class="l">Sampled rows</span><span class="v" id="kpiTotal">–</span></section>
   <section class="panel col-3 stat"><span class="l">Blocked</span><span class="v" id="kpiBlock">–</span></section>
   <section class="panel col-3 stat"><span class="l">Challenge</span><span class="v" id="kpiChallenge">–</span></section>
   <section class="panel col-3 stat"><span class="l">Allow / Log</span><span class="v" id="kpiAllow">–</span></section>
 
-  <section class="panel col-8"><h2>Events over time (hourly)</h2><div class="chart-wrap tall"><canvas id="chartSeries"></canvas></div></section>
-  <section class="panel col-4"><h2>By action</h2><div class="chart-wrap"><canvas id="chartAction"></canvas></div></section>
+  <section class="panel col-8"><h2>Events over time (hourly)</h2><div class="chart-wrap tall"><canvas id="chartSeries" role="img" aria-label="Sampled WAF rows over time"></canvas></div></section>
+  <section class="panel col-4"><h2>By action</h2><div class="chart-wrap"><canvas id="chartAction" role="img" aria-label="Sampled WAF rows by action"></canvas></div></section>
 
-  <section class="panel col-6"><h2>Top countries <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartCountry"></canvas></div></section>
-  <section class="panel col-6"><h2>Top hostnames <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartHost"></canvas></div></section>
+  <section class="panel col-6"><h2>Top countries <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartCountry" role="img" aria-label="Top countries by sampled WAF rows"></canvas></div><div id="chartCountryControls" class="chart-a11y-controls" aria-label="Country filter options"></div></section>
+  <section class="panel col-6"><h2>Top hostnames <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartHost" role="img" aria-label="Top hostnames by sampled WAF rows"></canvas></div><div id="chartHostControls" class="chart-a11y-controls" aria-label="Hostname filter options"></div></section>
 
-  <section class="panel col-6"><h2>Source (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource"></canvas></div></section>
+  <section class="panel col-6"><h2>Source (WAF service)</h2><div class="chart-wrap"><canvas id="chartSource" role="img" aria-label="Sampled WAF rows by source service"></canvas></div></section>
   <section class="panel col-6"><h2>Top rule IDs <span class="muted">(click = filter)</span></h2><div class="scroll"><table id="tblRules"><thead><tr><th>Rule ID</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></section>
 
   <section class="panel col-12"><h2>Top paths <span class="muted">(click = filter)</span></h2><div class="scroll"><table id="tblPaths"><thead><tr><th>Path</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></section>
@@ -156,21 +161,21 @@
   </section>
 </main>
 
-<main id="view-http" style="display:none">
+<main id="view-http" role="tabpanel" aria-labelledby="tab-http" hidden>
   <section class="panel col-3 stat"><span class="l">Requests</span><span class="v" id="hkpiReq">–</span></section>
   <section class="panel col-3 stat"><span class="l">Data transfer</span><span class="v" id="hkpiBytes">–</span></section>
-  <section class="panel col-3 stat"><span class="l">Visits</span><span class="v" id="hkpiVisits">–</span></section>
+  <section class="panel col-3 stat"><span class="l" id="hkpiVisitsLabel">Visits</span><span class="v" id="hkpiVisits">–</span></section>
   <section class="panel col-3 stat"><span class="l">Cached</span><span class="v" id="hkpiCached">–</span></section>
 
-  <section class="panel col-12"><h2>Requests &amp; data transfer over time <span class="muted" id="httpWindow"></span></h2><div class="chart-wrap tall"><canvas id="chartHttpSeries"></canvas></div></section>
+  <section class="panel col-12"><h2>Requests &amp; data transfer over time <span class="muted" id="httpWindow"></span></h2><div class="chart-wrap tall"><canvas id="chartHttpSeries" role="img" aria-label="HTTP requests and data transfer over time"></canvas></div></section>
 
-  <section class="panel col-4" id="panelHttpCountry"><h2>Top countries</h2><div class="chart-wrap"><canvas id="chartHttpCountry"></canvas></div></section>
-  <section class="panel col-4" id="panelHttpHost"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHttpHost"></canvas></div></section>
-  <section class="panel col-4" id="panelHttpContentType"><h2>Content type</h2><div class="chart-wrap"><canvas id="chartHttpContentType"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpCountry"><h2>Top countries</h2><div class="chart-wrap"><canvas id="chartHttpCountry" role="img" aria-label="Top countries by HTTP requests"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpHost"><h2>Top hostnames</h2><div class="chart-wrap"><canvas id="chartHttpHost" role="img" aria-label="Top hostnames by HTTP requests"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpContentType"><h2>Content type</h2><div class="chart-wrap"><canvas id="chartHttpContentType" role="img" aria-label="HTTP requests by content type"></canvas></div></section>
 
-  <section class="panel col-4" id="panelHttpCache"><h2>Cache status</h2><div class="chart-wrap"><canvas id="chartHttpCache"></canvas></div></section>
-  <section class="panel col-4" id="panelHttpVersion"><h2>HTTP version</h2><div class="chart-wrap"><canvas id="chartHttpVersion"></canvas></div></section>
-  <section class="panel col-4" id="panelHttpStatusClass"><h2>By status class</h2><div class="chart-wrap"><canvas id="chartHttpStatus"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpCache"><h2>Cache status</h2><div class="chart-wrap"><canvas id="chartHttpCache" role="img" aria-label="HTTP requests by cache status"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpVersion"><h2>HTTP version</h2><div class="chart-wrap"><canvas id="chartHttpVersion" role="img" aria-label="HTTP requests by protocol version"></canvas></div></section>
+  <section class="panel col-4" id="panelHttpStatusClass"><h2>By status class</h2><div class="chart-wrap"><canvas id="chartHttpStatus" role="img" aria-label="HTTP requests by response status class"></canvas></div></section>
 
   <section class="panel col-6" id="panelHttpPath"><h2>Top paths</h2><div class="scroll"><table id="tblHttpPaths"><thead><tr><th>Path</th><th class="num">Requests</th><th class="num">Data</th></tr></thead><tbody></tbody></table></div></section>
   <section class="panel col-6" id="panelHttpStatusCodes"><h2>Status codes</h2><div class="scroll"><table id="tblHttpStatus"><thead><tr><th>Status</th><th class="num">Requests</th></tr></thead><tbody></tbody></table></div></section>
@@ -180,7 +185,7 @@
       <div class="stat"><span class="l">Avg origin response</span><span class="v" id="hkpiOrigin">–</span></div>
       <div class="stat"><span class="l">Avg edge TTFB</span><span class="v" id="hkpiTtfb">–</span></div>
     </div>
-    <div class="chart-wrap"><canvas id="chartHttpPerf"></canvas></div>
+    <div class="chart-wrap"><canvas id="chartHttpPerf" role="img" aria-label="Origin response and edge time to first byte over time"></canvas></div>
   </section>
 </main>
 

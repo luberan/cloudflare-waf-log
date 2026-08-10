@@ -32,9 +32,12 @@ Out of scope:
 
 This project relies on:
 
-- **Cloudflare Access** in front of the Worker — without it, the dashboard would be public. The README explicitly requires it.
+- **Cloudflare Access** in front of the Worker plus mandatory in-code JWT verification for every API request. Missing production JWT configuration fails closed with `503`.
 - **Read-only Cloudflare API tokens** stored as Worker secrets — never committed to the repo, never sent to the browser.
 - **CSV-injection escaping** on raw event export (`=+-@\t\r` are prefixed with `'`).
 - **HTML escaping** of all user-controlled strings rendered into the DOM.
+- **Worker-first static asset handling** so CSP, `frame-ancestors 'none'`, `X-Frame-Options`, and the other security headers are applied to every asset.
+
+`ALLOW_UNAUTHENTICATED_LOCAL_DEV=true` is exclusively for local `.dev.vars` and is honored only on `localhost`/loopback request URLs. It cannot disable authentication on a deployed hostname. All identities admitted by one Access application can read all Cloudflare accounts configured in that Worker.
 
 If you find a way around any of these, please report it via the channel above.

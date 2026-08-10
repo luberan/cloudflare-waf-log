@@ -37,6 +37,7 @@ npm install
 CFACC_PERSONAL_LABEL=My account
 CFACC_PERSONAL_ACCOUNT=00000000000000000000000000000000
 CFACC_PERSONAL_TOKEN=cf_xxx
+ALLOW_UNAUTHENTICATED_LOCAL_DEV=true
 '@ | Out-File -Encoding utf8 .dev.vars
 
 npm run dev
@@ -55,10 +56,11 @@ See the [README](README.md#cloudflare-api-token--how-to-create-one) for token cr
 - **No emojis in code** (the one in the dashboard title is intentional).
 - **Avoid over-engineering** — this is a small dashboard, not a platform. Don't add abstractions for one-time operations.
 
-Run a type check before pushing:
+Run the full automated check and a production dry-run before pushing:
 
 ```powershell
-npx tsc --noEmit
+npm run check
+npm run deploy:dry-run
 ```
 
 ## Pull request process
@@ -66,7 +68,7 @@ npx tsc --noEmit
 1. **Fork** the repo and create a feature branch from `main`.
 2. **Make your change.** Keep the diff focused — one logical change per PR.
 3. **Update [README.md](README.md)** if you add/change a user-visible feature or an API endpoint.
-4. **Test locally** with `npm run dev`. Verify the dashboard still loads and the affected feature works end-to-end.
+4. **Test locally** with `npm run dev`. Verify the dashboard still loads and the affected feature works end-to-end. CI also runs `npm run check`, the Wrangler dry-run, and `npm audit`.
 5. **Open a PR** against `main`. The PR title becomes the squash-merge commit message, so make it descriptive (e.g. `Add CSV export filter for ASN`).
 6. **Wait for review.** Copilot code review runs automatically; a maintainer will follow up.
 
