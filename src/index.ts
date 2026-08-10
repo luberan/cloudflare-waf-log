@@ -131,17 +131,23 @@ class HttpError extends Error {
 
 // Security headers applied to every static asset response. The dashboard self-hosts all of its
 // scripts (Chart.js lives in /vendor, the app logic in /app.js), so the CSP can lock scripts to
-// same-origin. The single hash permits the exact inline script injected on the protected production
-// hostname; arbitrary inline JavaScript remains blocked. Inline styles / style attributes are still
+// same-origin. Cloudflare Bot JavaScript Detections recognizes a nonce in the response CSP and adds
+// it to the inline snippet it injects later at the edge. Inline styles / style attributes are still
 // used, hence 'unsafe-inline' for style only.
-const CLOUDFLARE_INLINE_SCRIPT_HASH = "'sha256-xsklteo2c6mjtDMT1yMUR6rFZTdHA0e+9S32lePbNtM='";
-const SECURITY_HEADERS: Record<string, string> = {
+const STATIC_SECURITY_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
-  "content-security-policy":
+};
+
+function contentSecurityPolicy(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(18));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const nonce = btoa(binary);
+  return (
     "default-src 'self'; " +
-    `script-src 'self' ${CLOUDFLARE_INLINE_SCRIPT_HASH}; ` +
+    `script-src 'self' 'nonce-${nonce}'; ` +
     "style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data:; " +
     "font-src 'self'; " +
@@ -149,8 +155,9 @@ const SECURITY_HEADERS: Record<string, string> = {
     "frame-ancestors 'none'; " +
     "base-uri 'none'; " +
     "object-src 'none'; " +
-    "form-action 'self'",
-};
+    "form-action 'self'"
+  );
+}
 
 // Accounts are derived from Worker secrets which cannot change without a redeploy (and a redeploy
 // spins up a fresh isolate), so the parsed list is memoized per Env for the isolate's lifetime.
@@ -1516,7 +1523,8 @@ export default {
     if (!url.pathname.startsWith("/api/")) {
       const res = await env.ASSETS.fetch(request);
       const headers = new Headers(res.headers);
-      for (const [k, v] of Object.entries(SECURITY_HEADERS)) headers.set(k, v);
+      for (const [k, v] of Object.entries(STATIC_SECURITY_HEADERS)) headers.set(k, v);
+      headers.set("content-security-policy", contentSecurityPolicy());
       // Always revalidate assets so a redeploy takes effect immediately instead of serving a stale
       // app.js/index.html from the browser or edge cache (the dashboard is small — 304s are cheap).
       headers.set("cache-control", "no-cache");

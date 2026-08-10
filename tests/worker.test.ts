@@ -164,11 +164,18 @@ describe("Worker security boundary", () => {
     });
 
     const response = await worker.fetch(new Request("https://dashboard.test/"), env);
+    const secondResponse = await worker.fetch(new Request("https://dashboard.test/"), env);
 
     const csp = response.headers.get("content-security-policy") ?? "";
+    const secondCsp = secondResponse.headers.get("content-security-policy") ?? "";
     const scriptSrc = csp.split(";").find((directive) => directive.trim().startsWith("script-src")) ?? "";
+    const nonce = scriptSrc.match(/'nonce-([^']+)'/)?.[1];
+    const secondNonce = secondCsp.match(/'nonce-([^']+)'/)?.[1];
     expect(csp).toContain("frame-ancestors 'none'");
-    expect(scriptSrc).toContain("'sha256-xsklteo2c6mjtDMT1yMUR6rFZTdHA0e+9S32lePbNtM='");
+    expect(nonce).toMatch(/^[A-Za-z0-9+/]{24}$/);
+    expect(secondNonce).toMatch(/^[A-Za-z0-9+/]{24}$/);
+    expect(secondNonce).not.toBe(nonce);
+    expect(scriptSrc).not.toContain("sha256-");
     expect(scriptSrc).not.toContain("'unsafe-inline'");
     expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(response.headers.get("cache-control")).toBe("no-cache");
