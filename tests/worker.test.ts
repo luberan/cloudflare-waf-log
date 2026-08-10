@@ -1,7 +1,16 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker, { alignDailyRange, parseFilters, parseHttpRange } from "../src/index";
 
 const hour = 60 * 60 * 1000;
+
+describe("deployment configuration", () => {
+  it("preserves dashboard-defined runtime variables during deploy", () => {
+    const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+
+    expect(config).toMatch(/"keep_vars"\s*:\s*true/);
+  });
+});
 
 function timeParams(hours = 1): URLSearchParams {
   const until = new Date(Date.now() - hour);
@@ -156,7 +165,11 @@ describe("Worker security boundary", () => {
 
     const response = await worker.fetch(new Request("https://dashboard.test/"), env);
 
-    expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    const csp = response.headers.get("content-security-policy") ?? "";
+    const scriptSrc = csp.split(";").find((directive) => directive.trim().startsWith("script-src")) ?? "";
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(scriptSrc).toContain("'sha256-xsklteo2c6mjtDMT1yMUR6rFZTdHA0e+9S32lePbNtM='");
+    expect(scriptSrc).not.toContain("'unsafe-inline'");
     expect(response.headers.get("x-frame-options")).toBe("DENY");
     expect(response.headers.get("cache-control")).toBe("no-cache");
   });

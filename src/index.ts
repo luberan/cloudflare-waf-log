@@ -131,14 +131,17 @@ class HttpError extends Error {
 
 // Security headers applied to every static asset response. The dashboard self-hosts all of its
 // scripts (Chart.js lives in /vendor, the app logic in /app.js), so the CSP can lock scripts to
-// same-origin. Inline styles / style attributes are still used, hence 'unsafe-inline' for style only.
+// same-origin. The single hash permits the exact inline script injected on the protected production
+// hostname; arbitrary inline JavaScript remains blocked. Inline styles / style attributes are still
+// used, hence 'unsafe-inline' for style only.
+const CLOUDFLARE_INLINE_SCRIPT_HASH = "'sha256-xsklteo2c6mjtDMT1yMUR6rFZTdHA0e+9S32lePbNtM='";
 const SECURITY_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "no-referrer",
   "x-frame-options": "DENY",
   "content-security-policy":
     "default-src 'self'; " +
-    "script-src 'self'; " +
+    `script-src 'self' ${CLOUDFLARE_INLINE_SCRIPT_HASH}; ` +
     "style-src 'self' 'unsafe-inline'; " +
     "img-src 'self' data:; " +
     "font-src 'self'; " +

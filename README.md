@@ -191,6 +191,8 @@ The Worker also verifies the Access JWT itself, so a removed or partially config
 | `CF_ACCESS_TEAM_DOMAIN` | Your Zero Trust team domain | `https://yourteam.cloudflareaccess.com` |
 | `CF_ACCESS_AUD` | Application Audience (AUD) tag of the Access application | `0a1b2c…` |
 
+These values may be configured as dashboard runtime variables. The committed Wrangler config sets `keep_vars: true`, so Workers Builds preserves dashboard-defined variables instead of deleting them on the next deploy. Because the currently deployed version already removed them, add both values once more after this fix is deployed (or immediately before the fixed build runs).
+
 Every `/api/*` request must carry a valid Access token (`Cf-Access-Jwt-Assertion` header or `CF_Authorization` cookie); the Worker checks the RS256 signature against your team's public keys plus the audience, issuer and expiry. Missing or partial production configuration returns `503` instead of failing open. Only local `.dev.vars` should set `ALLOW_UNAUTHENTICATED_LOCAL_DEV=true`; the bypass is accepted exclusively for `localhost`/loopback request URLs and cannot disable authentication on a deployed hostname.
 
 The verifier authorizes the Access application audience, not individual Cloudflare accounts. Every identity allowed by the Access policy can read every account configured in this Worker, so use a policy whose members are trusted for all of them.
@@ -216,7 +218,7 @@ Without this Wrangler would re-enable the default domains on every deploy, which
 - Tokens have read-only permissions — even a leaked secret cannot change anything in the CF accounts
 - The frontend never receives a token — `GET /api/accounts` returns only `id` + `label`
 - The Worker must sit behind Cloudflare Access, and its API also [requires a valid Access JWT](#required-api-jwt-verification)
-- All assets are served with a strict `Content-Security-Policy` (`script-src 'self'`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. All scripts are self-hosted (Chart.js in `public/vendor/`, app logic in `public/app.js`) — no third-party origins are loaded
+- All assets are served with a strict `Content-Security-Policy` (`script-src 'self' <exact-inline-hash>`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. Application scripts are self-hosted; the hash allows only the exact inline script observed on the protected production hostname, without enabling general `'unsafe-inline'`
 - CSV export escapes formula-trigger characters (`= + - @`) to prevent CSV/Excel formula injection, and the download filename is sanitised
 - Upstream calls to the Cloudflare API/GraphQL have a hard timeout, so a stalled upstream returns `504` instead of hanging the Worker
 - `.dev.vars` is listed in [.gitignore](.gitignore)
