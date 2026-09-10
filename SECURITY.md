@@ -33,7 +33,10 @@ Out of scope:
 This project relies on:
 
 - **Cloudflare Access** in front of the Worker plus mandatory in-code JWT verification for every API request. Missing production JWT configuration fails closed with `503`.
+- **Zone ownership checks** through the Cloudflare REST API before every zone-scoped operation, including cache hits. A token with broader permissions does not grant access to zones outside the configured account.
+- **JWT time validation** rejects expired tokens, tokens at their expiration boundary, and tokens with a future or malformed not-before claim.
 - **Read-only Cloudflare API tokens** stored as Worker secrets — never committed to the repo, never sent to the browser.
+- **Credential-scoped analytics caches** use the actual account identity, a non-plaintext credential fingerprint and exact time bounds. Token rotation or account reassignment changes the cache scope. For immediate invalidation after an in-place permission edit, rotate the token or purge cached data.
 - **CSV-injection escaping** on raw event export (`=+-@\t\r` are prefixed with `'`).
 - **HTML escaping** of all user-controlled strings rendered into the DOM.
 - **Worker-first static asset handling** so CSP, `frame-ancestors 'none'`, `X-Frame-Options`, and the other security headers are applied to every asset.

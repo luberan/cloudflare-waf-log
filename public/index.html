@@ -15,10 +15,11 @@
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
   header { background: var(--panel); border-bottom: 1px solid var(--border); padding: .85rem 1.25rem; display: flex; flex-direction: column; gap: .75rem; font-size: 15px; }
   header .row { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-  header h1 { font-size: 1.25rem; margin: 0; font-weight: 600; white-space: nowrap; }
+  header .row > * { min-width: 0; max-width: 100%; }
+  header h1 { font-size: 1.25rem; margin: 0; font-weight: 600; overflow-wrap: anywhere; }
   header .grow { flex: 1; }
   header label { color: var(--muted); display: inline-flex; align-items: center; gap: .45rem; font-size: 14px; }
-  header label input, header label select, header label textarea { color: var(--fg); }
+  header label input, header label select, header label textarea { color: var(--fg); min-width: 0; max-width: 100%; }
   header select, header input, header textarea, header button { padding: .5rem .7rem; font-size: 14px; }
   header button { font-size: 14px; }
   details.filters-bar { background: #0c0e13; border: 1px solid var(--border); border-radius: 8px; padding: 0; }
@@ -27,7 +28,7 @@
   details.filters-bar > summary::before { content: "▸"; transition: transform .15s; display: inline-block; }
   details.filters-bar[open] > summary::before { transform: rotate(90deg); }
   details.filters-bar > summary .badge-count { background: var(--accent); color: #000; font-weight: 600; padding: 2px 10px; border-radius: 999px; font-size: 12.5px; }
-  details.filters-bar .filters-grid { padding: .25rem .9rem .85rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: .65rem .9rem; }
+  details.filters-bar .filters-grid { padding: .25rem .9rem .85rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: .65rem .9rem; }
   details.filters-bar .filters-grid label { display: flex; flex-direction: column; gap: .3rem; font-size: 13px; color: var(--muted); }
   details.filters-bar .filters-grid input, details.filters-bar .filters-grid textarea { width: 100%; padding: .5rem .65rem; font-size: 14px; }
   .chip { font-size: 13px !important; padding: 4px 12px !important; }
@@ -37,7 +38,7 @@
   button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   main { padding: 1rem; display: grid; gap: 1rem; grid-template-columns: repeat(12, 1fr); }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; min-width: 0; }
   .panel h2 { margin: 0 0 .75rem; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
   .col-12 { grid-column: span 12; } .col-8 { grid-column: span 8; } .col-6 { grid-column: span 6; } .col-4 { grid-column: span 4; } .col-3 { grid-column: span 3; }
   @media (max-width: 1100px) { .col-8, .col-6, .col-4, .col-3 { grid-column: span 12; } }

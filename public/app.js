@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { actions: new Set(), charts: {}, tab: 'waf', httpLimits: {}, wafLimits: {}, rangeSel: { waf: '24', http: '24' } };
+const state = { actions: new Set(), charts: {}, tab: 'waf', httpLimits: {}, wafLimits: {}, rangeSel: { waf: '24', http: '24' }, queryWindows: {} };
 let loadSeq = 0;
 let zonesSeq = 0;
 let rangeSeq = 0;
@@ -14,23 +14,16 @@ async function api(path) {
 }
 
 function buildQuery() {
-  const p = new URLSearchParams();
-  p.set('account', $('#account').value);
-  p.set('zone', $('#zone').value);
-  const hours = Number($('#range').value);
-  const until = new Date();
-  const since = new Date(until.getTime() - hours*3600*1000);
-  p.set('since', since.toISOString());
-  p.set('until', until.toISOString());
+  const p = new URLSearchParams(buildBaseQuery());
   if (state.actions.size) p.set('action', [...state.actions].join(','));
-  const appendFilter = (param, inputId, transform) => {
-    for (const value of parseFilterSet(inputId, transform)) p.append(param, value);
+  const appendFilter = (param, inputId) => {
+    for (const value of parseFilterSet(inputId)) p.append(param, value);
   };
   appendFilter('host', 'hostFilter');
   appendFilter('path', 'pathFilter');
   appendFilter('rule', 'ruleFilter');
-  appendFilter('country', 'countryFilter', value => value.toUpperCase());
-  appendFilter('asn', 'asnFilter', value => value.replace(/^AS/i, ''));
+  appendFilter('country', 'countryFilter');
+  appendFilter('asn', 'asnFilter');
   appendFilter('ua', 'uaFilter');
   return p.toString();
 }
@@ -41,10 +34,15 @@ function buildBaseQuery() {
   p.set('account', $('#account').value);
   p.set('zone', $('#zone').value);
   const hours = Number($('#range').value);
-  const until = new Date();
-  const since = new Date(until.getTime() - hours*3600*1000);
-  p.set('since', since.toISOString());
-  p.set('until', until.toISOString());
+  const key = JSON.stringify([p.get('account'), p.get('zone'), hours]);
+  let snapshot = state.queryWindows[state.tab];
+  if (!snapshot || snapshot.key !== key) {
+    const untilMs = Date.now();
+    snapshot = { key, since: new Date(untilMs - hours*3600*1000).toISOString(), until: new Date(untilMs).toISOString() };
+    state.queryWindows[state.tab] = snapshot;
+  }
+  p.set('since', snapshot.since);
+  p.set('until', snapshot.until);
   return p.toString();
 }
 
@@ -54,25 +52,35 @@ function showWarn(msg) { const e = $('#warn'); if (msg) { e.textContent = msg; e
 // ── Facet (multi-select) helpers ────────────────────────────────────────────
 // Path and User-Agent use one exact value per line because commas are valid data;
 // the shorter facets accept comma- or newline-separated values.
-function parseFilterSet(inputId, transform) {
+function normalizeFilterValue(inputId, value) {
+  const normalized = String(value).trim();
+  if (inputId === 'countryFilter') return normalized.toUpperCase();
+  if (inputId === 'asnFilter') {
+    const digits = normalized.replace(/^AS/i, '');
+    return /^\d+$/.test(digits) ? String(Number(digits)) : digits;
+  }
+  return normalized;
+}
+
+function parseFilterSet(inputId) {
   const exactLines = inputId === 'pathFilter' || inputId === 'uaFilter';
   const separator = exactLines ? /\r?\n/ : /[,\r\n]+/;
-  const raw = ($('#'+inputId).value || '').split(separator).map(s => s.trim()).filter(Boolean);
-  return new Set(transform ? raw.map(transform) : raw);
+  const raw = ($('#'+inputId).value || '').split(separator).map(value => normalizeFilterValue(inputId, value)).filter(Boolean);
+  return new Set(raw);
 }
 function writeFilterSet(inputId, set) {
   const exactLines = inputId === 'pathFilter' || inputId === 'uaFilter';
   $('#'+inputId).value = [...set].join(exactLines ? '\n' : ',');
 }
-function toggleFilter(inputId, value, transform) {
+function toggleFilter(inputId, value) {
   if (value === undefined || value === null || value === '' || value === '?' || value === '(unknown)') return;
-  const v = transform ? transform(value) : String(value);
-  const set = parseFilterSet(inputId, transform);
-  if (set.has(v)) set.delete(v); else set.add(v);
+  const normalized = normalizeFilterValue(inputId, value);
+  const set = parseFilterSet(inputId);
+  if (set.has(normalized)) set.delete(normalized); else set.add(normalized);
   writeFilterSet(inputId, set);
   // Open the filter bar so the user can see / edit active filters
   const d = $('#filtersDetails'); if (d && !d.open) d.open = true;
-  load();
+  load(false);
 }
 function updateFiltersBadge() {
   const ids = ['hostFilter','pathFilter','ruleFilter','countryFilter','asnFilter','uaFilter'];
@@ -91,7 +99,24 @@ function barColors(keys, active, fallback) {
   return keys.map(k => active.has(k) ? ACTIVE_BAR : INACTIVE_BAR);
 }
 
-function destroyChart(key) { if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; } }
+function destroyChart(key) {
+  const canvas = $('#'+key);
+  if (canvas?._tickClickHandler) {
+    canvas.removeEventListener('click', canvas._tickClickHandler);
+    delete canvas._tickClickHandler;
+  }
+  if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; }
+}
+
+function clearDashboard() {
+  Object.keys(state.charts).forEach(destroyChart);
+  document.querySelectorAll('main tbody, .chart-a11y-controls').forEach(element => element.replaceChildren());
+  document.querySelectorAll('main .stat .v').forEach(element => { element.textContent = '-'; });
+  document.querySelectorAll('main canvas').forEach(canvas => canvas.setAttribute('aria-label', 'No data.'));
+  ['eventsCount', 'httpWindow', 'perf'].forEach(id => { $('#'+id).textContent = ''; });
+  $('#hkpiVisitsLabel').textContent = 'Visits';
+  showWarn('');
+}
 
 function describeChart(canvasId, title, labels, values, formatter = fmtNum) {
   const details = labels.slice(0, 20).map((label, index) => `${label}: ${formatter(values[index])}`);
@@ -183,26 +208,52 @@ function doughnut(canvasId, labels, values, colors) {
   });
 }
 
-function timeSeries(canvasId, series) {
+function timeStepMs(dim) {
+  return dim === 'date' ? 86400000 : (dim === 'datetimeMinute' ? 60000 : 3600000);
+}
+
+function timeBuckets(range, dim, timestamps) {
+  const snapshot = state.queryWindows[state.tab];
+  const sinceMs = Date.parse(range?.effectiveSince ?? snapshot?.since);
+  const untilMs = Date.parse(range?.effectiveUntil ?? snapshot?.until);
+  const available = timestamps.map(value => Date.parse(value)).filter(Number.isFinite);
+  const start = Number.isFinite(sinceMs) ? sinceMs : Math.min(...available);
+  const end = Number.isFinite(untilMs) ? untilMs : Math.max(...available);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return [];
+  const step = timeStepMs(dim);
+  const slots = [];
+  for (let timestamp = Math.floor(start / step) * step; timestamp <= end; timestamp += step) slots.push(timestamp);
+  return slots;
+}
+
+function completeTimeSeries(series, dim, range, empty) {
+  const step = timeStepMs(dim);
+  const byTime = new Map(series.map(point => [Math.floor(Date.parse(point.t) / step) * step, point]));
+  return timeBuckets(range, dim, series.map(point => point.t)).map(timestamp => ({
+    ...empty, ...byTime.get(timestamp), t: new Date(timestamp).toISOString(),
+  }));
+}
+
+function timeSeries(canvasId, series, range) {
   destroyChart(canvasId);
   // pivot to per-action
-  const hours = [...new Set(series.map(s => s.hour))].sort();
+  const hours = timeBuckets(range, 'datetimeHour', series.map(point => point.hour));
   const actions = [...new Set(series.map(s => s.action))];
   describeChart(canvasId, 'Sampled WAF rows by action over time', actions,
     actions.map(action => series.filter(point => point.action === action).reduce((sum, point) => sum + point.count, 0)));
-  const datasets = actions.map(a => ({
-    label: a,
-    data: hours.map(h => {
-      const m = series.find(x => x.hour === h && x.action === a);
-      return m ? m.count : 0;
-    }),
-    backgroundColor: ACTION_COLOR[a] || '#888',
-    borderColor: ACTION_COLOR[a] || '#888',
-    stack: 's',
-  }));
+  const datasets = actions.map(action => {
+    const counts = new Map(series.filter(point => point.action === action).map(point => [Date.parse(point.hour), point.count]));
+    return {
+      label: action,
+      data: hours.map(timestamp => counts.get(timestamp) ?? 0),
+      backgroundColor: ACTION_COLOR[action] || '#888',
+      borderColor: ACTION_COLOR[action] || '#888',
+      stack: 's',
+    };
+  });
   state.charts[canvasId] = new Chart($('#'+canvasId), {
     type: 'bar',
-    data: { labels: hours.map(h => h.replace('T',' ').slice(5,16)), datasets },
+    data: { labels: hours.map(timestamp => fmtTimeLabel(new Date(timestamp).toISOString(), 'datetimeHour')), datasets },
     options: { plugins: { legend: { labels: { color: '#e6e8ee' } } }, scales: { x: { stacked: true, ticks: { color: '#8a93a6' } }, y: { stacked: true, ticks: { color: '#8a93a6' } } }, maintainAspectRatio: false }
   });
 }
@@ -281,7 +332,7 @@ function renderEvents(events) {
       <td>${escapeHtml(e.source||'')}</td>
       <td>${escapeHtml(e.clientCountryName||'')}</td>
       <td>${escapeHtml(e.clientIP||'')}</td>
-      <td title="${escapeHtml(e.clientASNDescription||'')}">${e.clientAsn ? 'AS'+e.clientAsn : ''}</td>
+      <td title="${escapeHtml(e.clientASNDescription||'')}">AS${escapeHtml(e.clientAsn ?? 0)}</td>
       <td>${escapeHtml(e.clientRequestHTTPHost||'')}</td>
       <td title="${escapeHtml(e.clientRequestPath||'')}">${escapeHtml((e.clientRequestPath||'').slice(0,60))}</td>
       <td>${escapeHtml(e.clientRequestHTTPMethodName||'')}</td>
@@ -298,22 +349,27 @@ async function loadZones() {
   ++rangeSeq;
   ++loadSeq;
   const acc = $('#account').value;
+  clearDashboard();
+  $('#zone').replaceChildren();
+  ['zone', 'range', 'refresh', 'exportCsv'].forEach(id => { $('#'+id).disabled = true; });
   if (!acc) return;
-  showError(''); $('#refresh').disabled = true;
+  showError('');
   try {
     const { zones } = await api('/api/zones?account=' + encodeURIComponent(acc));
     if (seq !== zonesSeq || $('#account').value !== acc) return;
     if (!zones.length) { $('#zone').innerHTML = ''; showError('Account has no zones, or the token is missing Zone: Read.'); return; }
     $('#zone').innerHTML = zones.map(z => `<option value="${escapeHtml(z.id)}">${escapeHtml(z.name)} (${escapeHtml(z.plan||'?')})</option>`).join('');
+    $('#zone').disabled = false;
+    $('#range').disabled = false;
     await applyTabRangeAndLoad();
   } catch (e) { if (seq === zonesSeq) showError(e.message); }
-  finally { if (seq === zonesSeq) $('#refresh').disabled = false; }
 }
 
-async function load() {
+async function load(refreshWindow = true) {
   if (!$('#zone').value) return;
   const seq = ++loadSeq;
-  showError(''); showWarn(''); $('#refresh').disabled = true;
+  if (refreshWindow) delete state.queryWindows.waf;
+  showError(''); showWarn(''); $('#refresh').disabled = true; $('#exportCsv').disabled = true;
   const t0 = performance.now();
   try {
     const q = buildQuery();
@@ -339,7 +395,7 @@ async function load() {
     $('#kpiChallenge').textContent = (get('managed_challenge')+get('jschallenge')+get('challenge')).toLocaleString('en-US');
     $('#kpiAllow').textContent = (get('allow')+get('log')).toLocaleString('en-US');
 
-    timeSeries('chartSeries', summary.series);
+    timeSeries('chartSeries', summary.series, summary.range);
     doughnut('chartAction', summary.byAction.map(r=>r.key), summary.byAction.map(r=>r.count),
       summary.byAction.map(r => ACTION_COLOR[r.key] || '#888'));
     const countryKeys = summary.byCountry.slice(0,15).map(r=>r.key||'?');
@@ -370,8 +426,10 @@ async function load() {
     }
     showWarn(notes.join('  '));
   } catch (e) {
-    if (seq === loadSeq) showError(e.message);
-  } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
+    if (seq === loadSeq) { clearDashboard(); showError(e.message); }
+  } finally {
+    if (seq === loadSeq) { $('#refresh').disabled = false; $('#exportCsv').disabled = false; }
+  }
 }
 
 // ── HTTP Traffic tab ────────────────────────────────────────────────────────
@@ -392,6 +450,7 @@ function fmtDuration(secs) {
 }
 function fmtTimeLabel(t, dim) {
   const s = String(t || '');
+  if (dim === 'date') return s.slice(5, 10);
   return dim === 'datetimeMinute' ? s.slice(11, 16) : s.replace('T', ' ').slice(5, 16);
 }
 function statusClass(code) {
@@ -458,8 +517,9 @@ function comboChart(canvasId, labels, bars, line, barLabel, lineLabel) {
   });
 }
 
-function perfChart(canvasId, series, dim) {
+function perfChart(canvasId, series, dim, range) {
   destroyChart(canvasId);
+  series = completeTimeSeries(series, dim, range, { originMs: null, ttfbMs: null });
   const labels = series.map(s => fmtTimeLabel(s.t, dim));
   const available = series.filter(point => point.originMs != null || point.ttfbMs != null);
   $('#'+canvasId).setAttribute('aria-label', available.length
@@ -468,8 +528,8 @@ function perfChart(canvasId, series, dim) {
   state.charts[canvasId] = new Chart($('#'+canvasId), {
     type:'line',
     data:{ labels, datasets:[
-      { label:'Origin response (ms)', data:series.map(s=>s.originMs), borderColor:'#e67e22', backgroundColor:'#e67e22', tension:.3, pointRadius:0, borderWidth:2, spanGaps:true },
-      { label:'Edge TTFB (ms)', data:series.map(s=>s.ttfbMs), borderColor:'#3498db', backgroundColor:'#3498db', tension:.3, pointRadius:0, borderWidth:2, spanGaps:true },
+      { label:'Origin response (ms)', data:series.map(s=>s.originMs), borderColor:'#e67e22', backgroundColor:'#e67e22', tension:.3, pointRadius:2, borderWidth:2, spanGaps:false },
+      { label:'Edge TTFB (ms)', data:series.map(s=>s.ttfbMs), borderColor:'#3498db', backgroundColor:'#3498db', tension:.3, pointRadius:2, borderWidth:2, spanGaps:false },
     ]},
     options:{ maintainAspectRatio:false, plugins:{ legend:{ labels:{ color:'#e6e8ee' } } },
       scales:{ x:{ ticks:{ color:'#8a93a6', maxRotation:0, autoSkip:true, maxTicksLimit:12 }, grid:{ color:'#262b36' } }, y:{ beginAtZero:true, ticks:{ color:'#8a93a6' }, grid:{ color:'#262b36' } } } }
@@ -500,6 +560,7 @@ function renderHttpStatusTable(rows) {
 async function loadHttp() {
   if (!$('#zone').value) return;
   const seq = ++loadSeq;
+  delete state.queryWindows.http;
   showError(''); showWarn(''); $('#refresh').disabled = true;
   const t0 = performance.now();
   try {
@@ -529,8 +590,9 @@ async function loadHttp() {
     $('#hkpiVisits').textContent = visitorValue == null ? '—' : fmtNum(visitorValue);
     $('#hkpiCached').textContent = (d.totals.cachedPct == null) ? '—' : d.totals.cachedPct.toFixed(0) + '%';
 
-    const labels = d.series.map(s => fmtTimeLabel(s.t, d.timeDim));
-    comboChart('chartHttpSeries', labels, d.series.map(s=>s.requests), d.series.map(s=>s.bytes), 'Requests', 'Data transfer');
+    const series = completeTimeSeries(d.series, d.timeDim, d.range, { requests: 0, bytes: 0 });
+    const labels = series.map(point => fmtTimeLabel(point.t, d.timeDim));
+    comboChart('chartHttpSeries', labels, series.map(point=>point.requests), series.map(point=>point.bytes), 'Requests', 'Data transfer');
 
     renderHttpStatusDoughnut(d.byStatus || []);
 
@@ -563,7 +625,7 @@ async function loadHttp() {
     if (d.perf) {
       $('#hkpiOrigin').textContent = d.perf.originMs == null ? '—' : Math.round(d.perf.originMs) + ' ms';
       $('#hkpiTtfb').textContent = d.perf.ttfbMs == null ? '—' : Math.round(d.perf.ttfbMs) + ' ms';
-      perfChart('chartHttpPerf', d.perf.series || [], d.timeDim);
+      perfChart('chartHttpPerf', d.perf.series || [], d.timeDim, d.range);
     }
 
     const notes = [];
@@ -572,7 +634,7 @@ async function loadHttp() {
     if (!d.series.length) notes.push('No HTTP traffic in the selected range for this zone.');
     showWarn(notes.join('  '));
   } catch (e) {
-    if (seq === loadSeq) showError(e.message);
+    if (seq === loadSeq) { clearDashboard(); showError(e.message); }
   } finally { if (seq === loadSeq) $('#refresh').disabled = false; }
 }
 
@@ -624,6 +686,9 @@ async function applyTabRangeAndLoad() {
   const tab = state.tab;
   const acc = $('#account').value;
   const zone = $('#zone').value;
+  clearDashboard();
+  $('#refresh').disabled = true;
+  $('#exportCsv').disabled = true;
   if (!acc || !zone) return;
   if (tab === 'http') {
     const key = acc + '|' + zone;
@@ -695,7 +760,7 @@ async function init() {
       } catch (e) {
         showError('Export failed: ' + e.message);
       } finally {
-        btn.disabled = false;
+        btn.disabled = !$('#zone').value;
       }
     });
     $('#clearFilters').addEventListener('click', () => {
@@ -706,11 +771,16 @@ async function init() {
       });
       ['hostFilter','pathFilter','ruleFilter','countryFilter','asnFilter','uaFilter'].forEach(id => $('#'+id).value = '');
       updateFiltersBadge();
-      load();
+      load(false);
     });
     $('#account').addEventListener('change', loadZones);
     $('#zone').addEventListener('change', applyTabRangeAndLoad);
-    $('#range').addEventListener('change', () => { state.rangeSel[state.tab] = $('#range').value; loadActive(); });
+    $('#range').addEventListener('change', () => {
+      ++rangeSeq;
+      state.rangeSel[state.tab] = $('#range').value;
+      clearDashboard();
+      loadActive();
+    });
     const tabs = [...document.querySelectorAll('#tabs .tab')];
     tabs.forEach((button, index) => {
       button.addEventListener('click', () => setTab(button.dataset.tab));
