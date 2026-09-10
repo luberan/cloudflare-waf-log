@@ -55,11 +55,17 @@ const CF_GRAPHQL = "https://api.cloudflare.com/client/v4/graphql";
 // platform limit. AbortSignal.timeout rejects with a TimeoutError DOMException, surfaced as 504.
 const CF_FETCH_TIMEOUT_MS = 20000;
 
-async function timedFetch(input: string, init: RequestInit = {}): Promise<Response> {
+async function timedFetch<T>(
+  input: string,
+  init: RequestInit,
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
+  const signal = AbortSignal.timeout(CF_FETCH_TIMEOUT_MS);
   try {
-    return await fetch(input, { ...init, signal: AbortSignal.timeout(CF_FETCH_TIMEOUT_MS) });
+    const response = await fetch(input, { ...init, signal });
+    return await consume(response);
   } catch (e) {
-    if (e instanceof DOMException && e.name === "TimeoutError") {
+    if (signal.aborted || (e instanceof DOMException && e.name === "TimeoutError")) {
       throw new HttpError(504, "upstream request to Cloudflare timed out");
     }
     throw e;
@@ -247,7 +253,7 @@ export function parseFilters(url: URL): Filters {
       throw new HttpError(400, `invalid '${name}' filter value`);
     }
     const values = normalized.map(Number);
-    if (values.some((n) => !Number.isSafeInteger(n) || n <= 0 || n > 0xffffffff)) {
+    if (values.some((n) => !Number.isSafeInteger(n) || n < 0 || n > 0xffffffff)) {
       throw new HttpError(400, `invalid '${name}' filter value`);
     }
     return values;
@@ -262,7 +268,7 @@ export function parseFilters(url: URL): Filters {
     datetimeGeq: since.iso,
     datetimeLeq: until.iso,
     action: multi("action"),
-    clientCountryName: multi("country"),
+    clientCountryName: multi("country")?.map((country) => country.toUpperCase()),
     clientRequestHTTPHost: multi("host"),
     clientRequestPath: multi("path", false),
     ruleId: multi("rule"),
@@ -274,33 +280,47 @@ export function parseFilters(url: URL): Filters {
 }
 
 async function cfFetch<T>(acc: Account, path: string): Promise<T> {
-  const res = await timedFetch(`${CF_API}${path}`, {
+  return timedFetch(`${CF_API}${path}`, {
     headers: {
       authorization: `Bearer ${acc.token}`,
       "content-type": "application/json",
     },
+  }, async (res) => {
+    const body = (await res.json()) as { success: boolean; result: T; errors?: unknown };
+    if (!res.ok || !body.success) {
+      throw new Error(`Cloudflare API ${res.status}: ${JSON.stringify(body.errors ?? body)}`);
+    }
+    return body.result;
   });
-  const body = (await res.json()) as { success: boolean; result: T; errors?: unknown };
-  if (!res.ok || !body.success) {
-    throw new Error(`Cloudflare API ${res.status}: ${JSON.stringify(body.errors ?? body)}`);
-  }
-  return body.result;
 }
 
 async function gql<T>(acc: Account, query: string, variables: Record<string, unknown>): Promise<T> {
-  const res = await timedFetch(CF_GRAPHQL, {
+  return timedFetch(CF_GRAPHQL, {
     method: "POST",
     headers: {
       authorization: `Bearer ${acc.token}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({ query, variables }),
+  }, async (res) => {
+    const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
+    if (!res.ok || body.errors?.length) {
+      throw new Error(`GraphQL error: ${JSON.stringify(body.errors ?? res.statusText)}`);
+    }
+    return body.data as T;
   });
-  const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
-  if (!res.ok || body.errors?.length) {
-    throw new Error(`GraphQL error: ${JSON.stringify(body.errors ?? res.statusText)}`);
+}
+
+async function assertAccountZone(acc: Account, zone: string | null): Promise<void> {
+  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  if (zone.length > 128) throw new HttpError(400, "invalid 'zone' query parameter");
+  const details = await cfFetch<{ id: string; account?: { id: string } }>(
+    acc,
+    `/zones/${encodeURIComponent(zone)}`,
+  );
+  if (details.id !== zone || details.account?.id !== acc.accountId) {
+    throw new HttpError(403, "zone does not belong to the selected account");
   }
-  return body.data as T;
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -328,7 +348,6 @@ async function listZones(acc: Account): Promise<Response> {
     all.push(...result);
     if (result.length < 50) break;
     page++;
-    if (page > 20) break;
   }
   return json({
     zones: all
@@ -391,59 +410,58 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
 // Cache TTL for fetched events in the Worker Cache API. Short TTL keeps the data
 // reasonably fresh while making rapid facet-toggle UX instant.
 const EVENTS_CACHE_TTL_SECONDS = 300;
+const accountScopes = new WeakMap<Account, Promise<string>>();
+type CacheState = "HIT" | "MISS" | "BYPASS";
+
+function accountCacheScope(acc: Account): Promise<string> {
+  let scope = accountScopes.get(acc);
+  if (!scope) {
+    scope = crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([acc.accountId, acc.token])))
+      .then((digest) => Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""));
+    accountScopes.set(acc, scope);
+  }
+  return scope;
+}
+
+async function cachedAnalytics<T>(keyUrl: URL, load: () => Promise<T>): Promise<{ value: T; cacheState: CacheState }> {
+  const cacheKey = new Request(keyUrl.toString(), { method: "GET" });
+  let cache: Cache | undefined;
+  try {
+    cache = typeof caches === "undefined" ? undefined : (caches as unknown as { default?: Cache }).default;
+    const hit = await cache?.match(cacheKey);
+    if (hit) return { value: await hit.json() as T, cacheState: "HIT" };
+  } catch {
+    cache = undefined;
+  }
+
+  const value = await load();
+  if (!cache) return { value, cacheState: "BYPASS" };
+  try {
+    await cache.put(cacheKey, new Response(JSON.stringify(value), {
+      headers: { "content-type": "application/json", "cache-control": `public, max-age=${EVENTS_CACHE_TTL_SECONDS}` },
+    }));
+    return { value, cacheState: "MISS" };
+  } catch {
+    return { value, cacheState: "BYPASS" };
+  }
+}
 
 async function cachedFetchEvents(
   acc: Account,
   f: Filters,
   limit: number,
-): Promise<{ events: any[]; cacheState: "HIT" | "MISS" | "BYPASS" }> {
-  const cache = (caches as unknown as { default?: Cache }).default;
-  if (!cache) {
-    // Cache API not available (e.g. in tests) — fall back to a direct fetch.
-    const events = await fetchEvents(acc, f, limit);
-    return { events, cacheState: "BYPASS" };
-  }
-
-  // Cache key — unifies all attributes that distinguish the outer fetch.
-  // Account is part of the key (different token + different accountId); so are zone/time/action/source.
-  // Time bounds are rounded down to 5-minute buckets — the frontend sends `new Date().toISOString()`
-  // with millisecond precision, so without bucketing every request would have a unique key and
-  // the cache would never hit. 5 min = same as the TTL → within a cache lifetime all toggle
-  // requests hit the same key.
-  const bucket = (iso: string) => {
-    const ms = Date.parse(iso);
-    if (!Number.isFinite(ms)) return iso;
-    return new Date(Math.floor(ms / 300000) * 300000).toISOString();
-  };
-  const keyUrl = new URL("https://waf-cache.internal/events");
-  keyUrl.searchParams.set("acc", acc.id);
+): Promise<{ events: any[]; cacheState: CacheState }> {
+  const keyUrl = new URL("https://waf-cache.internal/v2/events");
+  keyUrl.searchParams.set("account", acc.accountId);
+  keyUrl.searchParams.set("scope", await accountCacheScope(acc));
   keyUrl.searchParams.set("zone", f.zoneTag);
-  keyUrl.searchParams.set("from", bucket(f.datetimeGeq));
-  keyUrl.searchParams.set("to", bucket(f.datetimeLeq));
+  keyUrl.searchParams.set("from", f.datetimeGeq);
+  keyUrl.searchParams.set("to", f.datetimeLeq);
   keyUrl.searchParams.set("action", (f.action ?? []).slice().sort().join(","));
   keyUrl.searchParams.set("source", (f.source ?? []).slice().sort().join(","));
   keyUrl.searchParams.set("limit", String(limit));
-  const cacheKey = new Request(keyUrl.toString(), { method: "GET" });
-
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const events = (await cached.json()) as any[];
-    return { events, cacheState: "HIT" };
-  }
-
-  const events = await fetchEvents(acc, f, limit);
-  // ctx.waitUntil would be slightly better (let the request finish first) but Cache.put
-  // is a fast write into edge cache — a few ms — so awaiting it is fine.
-  await cache.put(
-    cacheKey,
-    new Response(JSON.stringify(events), {
-      headers: {
-        "content-type": "application/json",
-        "cache-control": `public, max-age=${EVENTS_CACHE_TTL_SECONDS}`,
-      },
-    }),
-  );
-  return { events, cacheState: "MISS" };
+  const { value: events, cacheState } = await cachedAnalytics(keyUrl, () => fetchEvents(acc, f, limit));
+  return { events, cacheState };
 }
 
 async function getEvents(acc: Account, f: Filters): Promise<Response> {
@@ -542,7 +560,7 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
     if (exclude !== "host" && fHost && !fHost.has(e.clientRequestHTTPHost)) return false;
     if (exclude !== "path" && fPath && !fPath.has(e.clientRequestPath)) return false;
     if (exclude !== "rule" && fRule && !fRule.has(e.ruleId)) return false;
-    if (exclude !== "asn" && fAsn && !fAsn.has(String(e.clientAsn))) return false;
+    if (exclude !== "asn" && fAsn && !fAsn.has(String(e.clientAsn ?? 0))) return false;
     if (exclude !== "ua" && fUa && !fUa.has(e.userAgent)) return false;
     return true;
   };
@@ -881,7 +899,7 @@ function fallbackDatasetWindow(seconds: number): DatasetWindow {
 // limits decide where we switch datasets; maxRangeSeconds (the largest) is how far back the range
 // dropdown may offer. Best-effort: zeros on failure.
 async function httpLimitsSeconds(acc: Account, zone: string): Promise<HttpLimits> {
-  const cacheKey = `${acc.accountId}:${zone}`;
+  const cacheKey = `${await accountCacheScope(acc)}:${zone}`;
   const cached = httpLimitsCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
@@ -946,6 +964,8 @@ type WafLimit = DatasetWindow & { source: "cloudflare" | "fallback" };
 type WafRangeInfo = {
   requestedSeconds: number;
   effectiveSeconds: number;
+  effectiveSince: string;
+  effectiveUntil: string;
   clamped: boolean;
   maxRangeSeconds: number;
   limitSource: WafLimit["source"];
@@ -954,7 +974,7 @@ const WAF_FALLBACK_SECONDS = 31 * 24 * 60 * 60;
 const wafLimitsCache = new Map<string, LimitsCacheEntry<WafLimit>>();
 
 async function wafLimitSeconds(acc: Account, zone: string): Promise<WafLimit> {
-  const cacheKey = `${acc.accountId}:${zone}`;
+  const cacheKey = `${await accountCacheScope(acc)}:${zone}`;
   const cached = wafLimitsCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
   const query = /* GraphQL */ `
@@ -996,6 +1016,8 @@ async function clampWafFilters(
       range: {
         requestedSeconds,
         effectiveSeconds: requestedSeconds,
+        effectiveSince: filters.datetimeGeq,
+        effectiveUntil: filters.datetimeLeq,
         clamped: false,
         maxRangeSeconds: limit.maxRangeSeconds,
         limitSource: limit.source,
@@ -1018,6 +1040,8 @@ async function clampWafFilters(
     range: {
       requestedSeconds,
       effectiveSeconds,
+      effectiveSince: new Date(effectiveSinceMs).toISOString(),
+      effectiveUntil: filters.datetimeLeq,
       clamped,
       maxRangeSeconds: limit.maxRangeSeconds,
       limitSource: limit.source,
@@ -1030,6 +1054,7 @@ const HTTP_ADAPTIVE_FALLBACK_SECONDS = 24 * 60 * 60;
 const HTTP_HOURLY_FALLBACK_SECONDS = 3 * 24 * 60 * 60;
 const HTTP_DAILY_FALLBACK_SECONDS = 30 * 24 * 60 * 60;
 const DAY_SECONDS = 24 * 60 * 60;
+const HTTP_RETENTION_BOUNDARY_TOLERANCE_MS = 60_000;
 
 export function alignDailyRange(r: HttpRange, effectiveSeconds: number): { range: HttpRange; calendarDays: number } {
   const calendarDays = Math.max(1, Math.ceil(effectiveSeconds / DAY_SECONDS));
@@ -1075,23 +1100,24 @@ async function buildHttpStats(acc: Account, r: HttpRange) {
   ];
   const supports = ({ window }: (typeof candidates)[number]) =>
     requestedSeconds <= window.maxDurationSeconds &&
-    sinceMs >= nowMs - window.notOlderThanSeconds * 1000;
+    sinceMs >= nowMs - window.notOlderThanSeconds * 1000 - HTTP_RETENTION_BOUNDARY_TOLERANCE_MS &&
+    untilMs > nowMs - window.notOlderThanSeconds * 1000;
   let selected = candidates.find(supports);
   let clamped = false;
   if (!selected) {
     const eligible = candidates
-      .filter(({ window }) => untilMs >= nowMs - window.notOlderThanSeconds * 1000)
+      .filter(({ window }) => untilMs > nowMs - window.notOlderThanSeconds * 1000)
       .sort((a, b) => b.window.notOlderThanSeconds - a.window.notOlderThanSeconds);
     selected = eligible[0];
     if (!selected) throw new HttpError(400, "requested HTTP range is outside retained data");
-    const earliestMs = Math.max(
-      nowMs - selected.window.notOlderThanSeconds * 1000,
-      untilMs - selected.window.maxDurationSeconds * 1000,
-    );
-    if (earliestMs > sinceMs) {
-      r = { ...r, sinceIso: new Date(earliestMs).toISOString() };
-      clamped = true;
-    }
+  }
+  const earliestMs = Math.max(
+    nowMs - selected.window.notOlderThanSeconds * 1000,
+    untilMs - selected.window.maxDurationSeconds * 1000,
+  );
+  if (earliestMs > sinceMs) {
+    r = { ...r, sinceIso: new Date(earliestMs).toISOString() };
+    clamped = true;
   }
   const tier = selected.tier;
   let effectiveSeconds = Math.max(0, Math.round((untilMs - Date.parse(r.sinceIso)) / 1000));
@@ -1326,41 +1352,14 @@ async function buildHttpStatsRollup(acc: Account, r: HttpRange, dataset: string,
 
 async function getHttpStats(acc: Account, url: URL): Promise<Response> {
   const r = parseHttpRange(url);
-  const cache = (caches as unknown as { default?: Cache }).default;
-  const bucket = (iso: string) => {
-    const ms = Date.parse(iso);
-    return Number.isFinite(ms) ? new Date(Math.floor(ms / 300000) * 300000).toISOString() : iso;
-  };
-
-  if (!cache) {
-    const payload = await buildHttpStats(acc, r);
-    return json({ ...payload, cache: "BYPASS" }, { headers: { "x-cache": "BYPASS" } });
-  }
-
-  const keyUrl = new URL("https://waf-cache.internal/http-stats");
-  keyUrl.searchParams.set("acc", acc.id);
+  const keyUrl = new URL("https://waf-cache.internal/v2/http-stats");
+  keyUrl.searchParams.set("account", acc.accountId);
+  keyUrl.searchParams.set("scope", await accountCacheScope(acc));
   keyUrl.searchParams.set("zone", r.zoneTag);
-  keyUrl.searchParams.set("from", bucket(r.sinceIso));
-  keyUrl.searchParams.set("to", bucket(r.untilIso));
-  const cacheKey = new Request(keyUrl.toString(), { method: "GET" });
-
-  const hit = await cache.match(cacheKey);
-  if (hit) {
-    const payload = (await hit.json()) as Record<string, unknown>;
-    return json({ ...payload, cache: "HIT" }, { headers: { "x-cache": "HIT" } });
-  }
-
-  const payload = await buildHttpStats(acc, r);
-  await cache.put(
-    cacheKey,
-    new Response(JSON.stringify(payload), {
-      headers: {
-        "content-type": "application/json",
-        "cache-control": `public, max-age=${EVENTS_CACHE_TTL_SECONDS}`,
-      },
-    }),
-  );
-  return json({ ...payload, cache: "MISS" }, { headers: { "x-cache": "MISS" } });
+  keyUrl.searchParams.set("from", r.sinceIso);
+  keyUrl.searchParams.set("to", r.untilIso);
+  const { value: payload, cacheState } = await cachedAnalytics(keyUrl, () => buildHttpStats(acc, r));
+  return json({ ...payload, cache: cacheState }, { headers: { "x-cache": cacheState } });
 }
 
 // Per-zone/plan limits for the HTTP dataset, queried from the GraphQL Settings node. Unlike WAF
@@ -1424,10 +1423,11 @@ async function getAccessJwks(teamDomain: string, refresh = false): Promise<Acces
   if (cached && cached.exp > now) {
     if (!refresh || now - cached.lastForcedRefreshAt < JWKS_UNKNOWN_KID_REFRESH_MS) return cached.keys;
   }
-  const res = await timedFetch(`${teamDomain}/cdn-cgi/access/certs`, { method: "GET" });
-  if (!res.ok) throw new HttpError(403, "unable to fetch Access signing keys");
-  const body = (await res.json()) as { keys?: AccessJwk[] };
-  const keys = body.keys ?? [];
+  const keys = await timedFetch(`${teamDomain}/cdn-cgi/access/certs`, { method: "GET" }, async (res) => {
+    if (!res.ok) throw new HttpError(403, "unable to fetch Access signing keys");
+    const body = (await res.json()) as { keys?: AccessJwk[] };
+    return body.keys ?? [];
+  });
   jwksCache.set(teamDomain, {
     keys,
     exp: now + JWKS_TTL_MS,
@@ -1476,11 +1476,15 @@ async function verifyAccess(env: Env, request: Request): Promise<void> {
   const [rawHeader, rawPayload, rawSig] = segments;
 
   let header: { alg?: string; kid?: string };
-  let payload: { aud?: string | string[]; exp?: number; iss?: string };
+  let payload: { aud?: string | string[]; exp?: number; nbf?: number; iss?: string };
   try {
     header = b64urlToJson(rawHeader);
     payload = b64urlToJson(rawPayload);
   } catch {
+    throw new HttpError(403, "invalid Access token");
+  }
+  if (!header || typeof header !== "object" || Array.isArray(header) ||
+      !payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new HttpError(403, "invalid Access token");
   }
   if (header.alg !== "RS256" || !header.kid) throw new HttpError(403, "unsupported Access token");
@@ -1506,8 +1510,13 @@ async function verifyAccess(env: Env, request: Request): Promise<void> {
   );
   if (!ok) throw new HttpError(403, "invalid Access token signature");
 
-  if (typeof payload.exp !== "number" || payload.exp < Math.floor(Date.now() / 1000)) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp) || payload.exp <= nowSeconds) {
     throw new HttpError(403, "expired Access token");
+  }
+  if (payload.nbf !== undefined &&
+      (typeof payload.nbf !== "number" || !Number.isFinite(payload.nbf) || payload.nbf > nowSeconds)) {
+    throw new HttpError(403, "Access token is not valid yet");
   }
   if (payload.iss !== teamDomain) throw new HttpError(403, "Access token issuer mismatch");
   const auds = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
@@ -1539,6 +1548,12 @@ export default {
       const account = pickAccount(env, url);
 
       if (url.pathname === "/api/zones") return await listZones(account);
+      const zoneEndpoints = [
+        "/api/log", "/api/stats", "/api/http-stats", "/api/http-settings", "/api/waf-settings", "/api/export.csv",
+      ];
+      if (!zoneEndpoints.includes(url.pathname)) return err(404, "not found");
+      await assertAccountZone(account, url.searchParams.get("zone"));
+
       if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
       if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
       if (url.pathname === "/api/http-stats") return await getHttpStats(account, url);

@@ -70,6 +70,7 @@ function createDashboard(handler: ApiHandler) {
     pretendToBeVisual: true,
   });
   const requests: URL[] = [];
+  const charts = new Map<string, ChartMock>();
 
   class ChartMock {
     canvas: HTMLCanvasElement;
@@ -79,9 +80,10 @@ function createDashboard(handler: ApiHandler) {
     constructor(canvas: HTMLCanvasElement, config: any) {
       this.canvas = canvas;
       this.data = config.data;
+      charts.set(canvas.id, this);
     }
 
-    destroy() {}
+    destroy() { charts.delete(this.canvas.id); }
   }
 
   Object.assign(dom.window, {
@@ -93,7 +95,7 @@ function createDashboard(handler: ApiHandler) {
     }),
   });
   dom.window.eval(appScript);
-  return { dom, window: dom.window, document: dom.window.document, requests };
+  return { dom, window: dom.window, document: dom.window.document, requests, charts };
 }
 
 async function waitUntil(predicate: () => boolean) {
@@ -110,6 +112,70 @@ afterEach(() => {
 });
 
 describe("dashboard request coordination", () => {
+  it.each(["empty", "failure"])("clears the previous account while loading an %s zone response", async (outcome) => {
+    const nextZones = deferred<{ zones: never[] }>();
+    const dashboard = createDashboard((url) => {
+      if (url.pathname === "/api/accounts") return { accounts: [{ id: "a", label: "A" }, { id: "b", label: "B" }] };
+      if (url.pathname === "/api/zones") {
+        if (url.searchParams.get("account") === "a") return { zones: [{ id: "zone-a", name: "a.test", plan: "Free" }] };
+        return nextZones.promise.then(value => {
+          if (outcome === "failure") throw new Error("zone lookup failed");
+          return value;
+        });
+      }
+      if (url.pathname === "/api/waf-settings") return { maxRangeSeconds: 86400, source: "cloudflare" };
+      if (url.pathname === "/api/stats") return {
+        ...emptyWafSummary, byAction: [{ key: "block", count: 1 }], byCountry: [{ key: "US", count: 1 }],
+        events: [{ action: "block", clientRequestHTTPHost: "a.test" }],
+      };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    await waitUntil(() => dashboard.document.querySelector("#kpiTotal")?.textContent === "1");
+    const account = dashboard.document.querySelector("#account") as HTMLSelectElement;
+    account.value = "b";
+    account.dispatchEvent(new dashboard.window.Event("change"));
+
+    expect((dashboard.document.querySelector("#zone") as HTMLSelectElement).value).toBe("");
+    expect(dashboard.document.querySelector("#kpiTotal")?.textContent).toBe("-");
+    expect(dashboard.document.querySelectorAll("#tblEvents tbody tr, #chartCountryControls button")).toHaveLength(0);
+    expect((dashboard.document.querySelector("#refresh") as HTMLButtonElement).disabled).toBe(true);
+    expect((dashboard.document.querySelector("#exportCsv") as HTMLButtonElement).disabled).toBe(true);
+
+    nextZones.resolve({ zones: [] });
+    await waitUntil(() => Boolean(dashboard.document.querySelector("#error")?.textContent));
+    expect((dashboard.document.querySelector("#zone") as HTMLSelectElement).value).toBe("");
+    expect(dashboard.document.querySelector("#kpiTotal")?.textContent).toBe("-");
+    (dashboard.document.querySelector("#refresh") as HTMLButtonElement).click();
+    expect(dashboard.requests.filter(url => url.pathname === "/api/stats")).toHaveLength(1);
+    await closeDashboard(dashboard);
+  });
+
+  it("keeps the snapshot interval for facets and starts a new interval on Load", async () => {
+    const dashboard = createDashboard((url) => {
+      if (url.pathname === "/api/accounts") return { accounts: [{ id: "a", label: "A" }] };
+      if (url.pathname === "/api/zones") return { zones: [{ id: "zone-a", name: "a.test", plan: "Free" }] };
+      if (url.pathname === "/api/waf-settings") return { maxRangeSeconds: 86400, source: "cloudflare" };
+      if (url.pathname === "/api/stats") return { ...emptyWafSummary, byCountry: [{ key: "US", count: 1 }] };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    await waitUntil(() => dashboard.document.querySelector("#kpiTotal")?.textContent === "0");
+    const first = dashboard.requests.find(url => url.pathname === "/api/stats")!;
+    const later = Date.parse(first.searchParams.get("until")!) + 240000;
+    vi.spyOn(dashboard.window.Date, "now").mockReturnValue(later);
+    (dashboard.document.querySelector("#chartCountryControls button") as HTMLButtonElement).click();
+    await waitUntil(() => dashboard.requests.filter(url => url.pathname === "/api/stats").length === 2);
+    const facet = dashboard.requests.filter(url => url.pathname === "/api/stats").at(-1)!;
+
+    expect(facet.searchParams.get("since")).toBe(first.searchParams.get("since"));
+    expect(facet.searchParams.get("until")).toBe(first.searchParams.get("until"));
+    await waitUntil(() => !(dashboard.document.querySelector("#refresh") as HTMLButtonElement).disabled);
+    (dashboard.document.querySelector("#refresh") as HTMLButtonElement).click();
+    await waitUntil(() => dashboard.requests.filter(url => url.pathname === "/api/stats").length === 3);
+    const refreshed = dashboard.requests.filter(url => url.pathname === "/api/stats").at(-1)!;
+    expect(refreshed.searchParams.get("until")).toBe(new Date(later).toISOString());
+    await closeDashboard(dashboard);
+  });
+
   it("does not let an old account response replace the current zones", async () => {
     const zonesA = deferred<{ zones: { id: string; name: string; plan: string }[] }>();
     const dashboard = createDashboard((url) => {
@@ -171,7 +237,105 @@ describe("dashboard request coordination", () => {
   });
 });
 
+describe("dashboard time axes", () => {
+  it("includes leading, internal and trailing empty hours in WAF charts", async () => {
+    const dashboard = createDashboard((url) => {
+      if (url.pathname === "/api/accounts") return { accounts: [{ id: "a", label: "A" }] };
+      if (url.pathname === "/api/zones") return { zones: [{ id: "zone-a", name: "a.test", plan: "Free" }] };
+      if (url.pathname === "/api/waf-settings") return { maxRangeSeconds: 86400, source: "cloudflare" };
+      if (url.pathname === "/api/stats") return {
+        ...emptyWafSummary,
+        range: { ...emptyWafSummary.range, effectiveSince: "2026-09-10T00:00:00Z", effectiveUntil: "2026-09-10T07:59:59Z" },
+        byAction: [{ key: "block", count: 5 }],
+        series: [
+          { hour: "2026-09-10T01:00:00Z", action: "block", count: 2 },
+          { hour: "2026-09-10T06:00:00Z", action: "block", count: 3 },
+        ],
+      };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    await waitUntil(() => dashboard.document.querySelector("#kpiTotal")?.textContent === "5");
+
+    const chart = dashboard.charts.get("chartSeries")!;
+    expect(chart.data.labels).toHaveLength(8);
+    expect(chart.data.labels[0]).toBe("09-10 00:00");
+    expect(chart.data.labels[7]).toBe("09-10 07:00");
+    expect(chart.data.datasets[0].data).toEqual([0, 2, 0, 0, 0, 0, 3, 0]);
+    await closeDashboard(dashboard);
+  });
+
+  it.each([
+    { dim: "datetimeMinute", since: "2026-09-10T10:00:00Z", until: "2026-09-10T10:04:59Z", first: "2026-09-10T10:01:00Z", last: "2026-09-10T10:03:00Z" },
+    { dim: "datetimeHour", since: "2026-09-10T00:00:00Z", until: "2026-09-10T04:59:59Z", first: "2026-09-10T01:00:00Z", last: "2026-09-10T03:00:00Z" },
+    { dim: "datetime", since: "2026-09-10T00:00:00Z", until: "2026-09-10T04:59:59Z", first: "2026-09-10T01:00:00Z", last: "2026-09-10T03:00:00Z" },
+    { dim: "date", since: "2026-09-01T00:00:00Z", until: "2026-09-05T23:59:59Z", first: "2026-09-02", last: "2026-09-04" },
+  ])("fills $dim traffic gaps and leaves missing performance as null", async ({ dim, since, until, first, last }) => {
+    const dashboard = createDashboard((url) => {
+      if (url.pathname === "/api/accounts") return { accounts: [{ id: "a", label: "A" }] };
+      if (url.pathname === "/api/zones") return { zones: [{ id: "zone-a", name: "a.test", plan: "Free" }] };
+      if (url.pathname === "/api/waf-settings") return { maxRangeSeconds: 86400, source: "cloudflare" };
+      if (url.pathname === "/api/stats") return emptyWafSummary;
+      if (url.pathname === "/api/http-stats") return {
+        ...emptyHttpSummary, timeDim: dim,
+        range: { ...emptyHttpSummary.range, effectiveSince: since, effectiveUntil: until },
+        totals: { ...emptyHttpSummary.totals, requests: 12 },
+        series: [{ t: first, requests: 5, bytes: 50 }, { t: last, requests: 7, bytes: 70 }],
+        perf: {
+          ttfbMs: 30, originMs: 60,
+          series: [{ t: first, ttfbMs: 20, originMs: 40 }, { t: last, ttfbMs: 40, originMs: 80 }],
+        },
+      };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    await waitUntil(() => dashboard.document.querySelector("#kpiTotal")?.textContent === "0");
+    (dashboard.document.querySelector("#tab-http") as HTMLButtonElement).click();
+    await waitUntil(() => dashboard.document.querySelector("#hkpiReq")?.textContent === "12");
+
+    const traffic = dashboard.charts.get("chartHttpSeries")!;
+    expect(traffic.data.labels).toHaveLength(5);
+    expect(traffic.data.datasets[0].data).toEqual([0, 5, 0, 7, 0]);
+    expect(traffic.data.datasets[1].data).toEqual([0, 50, 0, 70, 0]);
+    const perf = dashboard.charts.get("chartHttpPerf")!;
+    expect(perf.data.datasets[0].data).toEqual([null, 40, null, 80, null]);
+    expect(perf.data.datasets[0].spanGaps).toBe(false);
+    expect(perf.data.datasets[0].pointRadius).toBeGreaterThan(0);
+    expect(perf.data.datasets[1].data).toEqual([null, 20, null, 40, null]);
+    await closeDashboard(dashboard);
+  });
+});
+
 describe("dashboard filters and accessibility", () => {
+  it.each([
+    { inputId: "countryFilter", initial: "us,US", parameter: "country", value: "US", selector: "#chartCountryControls button" },
+    { inputId: "asnFilter", initial: "AS013335,13335", parameter: "asn", value: "13335", selector: '#tblAsn tr[data-asn="13335"]' },
+    { inputId: "asnFilter", initial: "AS0", parameter: "asn", value: "0", selector: '#tblAsn tr[data-asn="0"]' },
+  ])("normalizes $initial for highlighting, queries and toggling", async ({ inputId, initial, parameter, value, selector }) => {
+    const dashboard = createDashboard((url) => {
+      if (url.pathname === "/api/accounts") return { accounts: [{ id: "a", label: "A" }] };
+      if (url.pathname === "/api/zones") return { zones: [{ id: "zone-a", name: "a.test", plan: "Free" }] };
+      if (url.pathname === "/api/waf-settings") return { maxRangeSeconds: 86400, source: "cloudflare" };
+      if (url.pathname === "/api/stats") return {
+        ...emptyWafSummary, byCountry: [{ key: "US", count: 1 }],
+        byAsn: [{ key: "13335", label: "Cloudflare", count: 1 }, { key: "0", label: "(unknown)", count: 1 }],
+      };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    await waitUntil(() => dashboard.document.querySelector("#kpiTotal")?.textContent === "0");
+    const input = dashboard.document.querySelector(`#${inputId}`) as HTMLInputElement;
+    input.value = initial;
+    (dashboard.document.querySelector("#refresh") as HTMLButtonElement).click();
+    await waitUntil(() => dashboard.document.querySelector(selector)?.getAttribute("aria-pressed") === "true");
+    const filtered = dashboard.requests.filter(url => url.pathname === "/api/stats").at(-1)!;
+    expect(filtered.searchParams.getAll(parameter)).toEqual([value]);
+
+    (dashboard.document.querySelector(selector) as HTMLElement).click();
+    await waitUntil(() => dashboard.requests.filter(url => url.pathname === "/api/stats").length === 3);
+    const cleared = dashboard.requests.filter(url => url.pathname === "/api/stats").at(-1)!;
+    expect(input.value).toBe("");
+    expect(cleared.searchParams.getAll(parameter)).toEqual([]);
+    await closeDashboard(dashboard);
+  });
+
   it("sends exact comma-containing path and UA values and exposes chart filter buttons", async () => {
     const dashboard = createDashboard((url) => {
       if (url.pathname === "/api/accounts") return { accounts: [{ id: "a", label: "A" }] };
