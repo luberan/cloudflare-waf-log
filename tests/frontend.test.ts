@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { JSDOM } from "jsdom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const root = resolve(import.meta.dirname, "..");
 const html = readFileSync(resolve(root, "public/index.html"), "utf8");
 const appScript = readFileSync(resolve(root, "public/app.js"), "utf8");
+const dashboards = new Set<JSDOM>();
 
 const emptyWafSummary = {
   byAction: [],
@@ -69,6 +71,7 @@ function createDashboard(handler: ApiHandler) {
     runScripts: "outside-only",
     pretendToBeVisual: true,
   });
+  dashboards.add(dom);
   const requests: URL[] = [];
   const charts = new Map<string, ChartMock>();
 
@@ -102,12 +105,10 @@ async function waitUntil(predicate: () => boolean) {
   await vi.waitFor(() => expect(predicate()).toBe(true), { timeout: 2000, interval: 5 });
 }
 
-async function closeDashboard(dashboard: ReturnType<typeof createDashboard>) {
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  dashboard.dom.window.close();
-}
-
-afterEach(() => {
+afterEach(async () => {
+  await nextTurn();
+  for (const dom of dashboards) dom.window.close();
+  dashboards.clear();
   vi.restoreAllMocks();
 });
 
@@ -147,7 +148,6 @@ describe("dashboard request coordination", () => {
     expect(dashboard.document.querySelector("#kpiTotal")?.textContent).toBe("-");
     (dashboard.document.querySelector("#refresh") as HTMLButtonElement).click();
     expect(dashboard.requests.filter(url => url.pathname === "/api/stats")).toHaveLength(1);
-    await closeDashboard(dashboard);
   });
 
   it("keeps the snapshot interval for facets and starts a new interval on Load", async () => {
@@ -173,7 +173,6 @@ describe("dashboard request coordination", () => {
     await waitUntil(() => dashboard.requests.filter(url => url.pathname === "/api/stats").length === 3);
     const refreshed = dashboard.requests.filter(url => url.pathname === "/api/stats").at(-1)!;
     expect(refreshed.searchParams.get("until")).toBe(new Date(later).toISOString());
-    await closeDashboard(dashboard);
   });
 
   it("does not let an old account response replace the current zones", async () => {
@@ -194,12 +193,11 @@ describe("dashboard request coordination", () => {
     await waitUntil(() => (dashboard.document.querySelector("#zone") as HTMLSelectElement).value === "zone-b");
 
     zonesA.resolve({ zones: [{ id: "zone-a", name: "a.test", plan: "Free" }] });
-    await Promise.resolve();
-    await Promise.resolve();
+    // The fetch and JSON promise chain must finish before asserting that nothing changed.
+    await nextTurn();
 
     expect(account.value).toBe("b");
     expect((dashboard.document.querySelector("#zone") as HTMLSelectElement).value).toBe("zone-b");
-    await closeDashboard(dashboard);
   });
 
   it("does not let a late HTTP response change the active WAF range", async () => {
@@ -224,16 +222,15 @@ describe("dashboard request coordination", () => {
     (dashboard.document.querySelector("#tab-waf") as HTMLButtonElement).click();
     await waitUntil(() => dashboard.document.querySelector("#view-waf")?.hasAttribute("hidden") === false);
     expect(dashboard.window.getComputedStyle(dashboard.document.querySelector("#view-http")!).display).toBe("none");
+    await waitUntil(() => dashboard.document.querySelector("#kpiTotal")?.textContent === "0");
 
     httpStats.resolve(emptyHttpSummary);
-    await Promise.resolve();
-    await Promise.resolve();
+    await nextTurn();
 
     const range = dashboard.document.querySelector("#range") as HTMLSelectElement;
     expect(range.value).toBe("24");
     expect([...range.options].map((option) => option.value)).toEqual(["1", "6", "24"]);
     expect(dashboard.document.querySelector("#tab-waf")?.getAttribute("aria-selected")).toBe("true");
-    await closeDashboard(dashboard);
   });
 });
 
@@ -261,7 +258,6 @@ describe("dashboard time axes", () => {
     expect(chart.data.labels[0]).toBe("09-10 00:00");
     expect(chart.data.labels[7]).toBe("09-10 07:00");
     expect(chart.data.datasets[0].data).toEqual([0, 2, 0, 0, 0, 0, 3, 0]);
-    await closeDashboard(dashboard);
   });
 
   it.each([
@@ -300,7 +296,6 @@ describe("dashboard time axes", () => {
     expect(perf.data.datasets[0].spanGaps).toBe(false);
     expect(perf.data.datasets[0].pointRadius).toBeGreaterThan(0);
     expect(perf.data.datasets[1].data).toEqual([null, 20, null, 40, null]);
-    await closeDashboard(dashboard);
   });
 });
 
@@ -333,7 +328,6 @@ describe("dashboard filters and accessibility", () => {
     const cleared = dashboard.requests.filter(url => url.pathname === "/api/stats").at(-1)!;
     expect(input.value).toBe("");
     expect(cleared.searchParams.getAll(parameter)).toEqual([]);
-    await closeDashboard(dashboard);
   });
 
   it("sends exact comma-containing path and UA values and exposes chart filter buttons", async () => {
@@ -379,6 +373,5 @@ describe("dashboard filters and accessibility", () => {
     action.click();
     expect(action.getAttribute("aria-pressed")).toBe("true");
     expect(dashboard.document.querySelectorAll('canvas[role="img"][aria-label]').length).toBeGreaterThan(0);
-    await closeDashboard(dashboard);
   });
 });

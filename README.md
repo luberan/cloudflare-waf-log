@@ -120,8 +120,10 @@ For **each CF account** create THREE secrets:
 
 ### Local development
 
+Use Node.js 22 or newer (CI runs Node.js 22).
+
 ```powershell
-npm install
+npm ci
 
 # Create .dev.vars (DO NOT commit — it's in .gitignore).
 @'
@@ -139,8 +141,7 @@ Open <http://localhost:8787>.
 Run all automated checks without Cloudflare credentials:
 
 ```powershell
-npm run check
-npm run deploy:dry-run
+npm run check:ci
 ```
 
 ### Production — Worker secrets
