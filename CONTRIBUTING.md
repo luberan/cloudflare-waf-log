@@ -27,10 +27,12 @@ Features that would require a paid CF plan, a build pipeline, or persistent stor
 
 ## Development setup
 
+Use Node.js 22 or newer (CI runs Node.js 22).
+
 ```powershell
 git clone https://github.com/<your-fork>/cloudflare-waf-log.git
 cd cloudflare-waf-log
-npm install
+npm ci
 
 # Create .dev.vars with at least one account (NEVER commit this file)
 @'
@@ -56,19 +58,30 @@ See the [README](README.md#cloudflare-api-token--how-to-create-one) for token cr
 - **No emojis in code** (the one in the dashboard title is intentional).
 - **Avoid over-engineering** — this is a small dashboard, not a platform. Don't add abstractions for one-time operations.
 
-Run the full automated check and a production dry-run before pushing:
+Run the same checks as CI, including a production dry-run and dependency audit, before pushing:
 
 ```powershell
-npm run check
-npm run deploy:dry-run
+npm run check:ci
 ```
+
+This runs `npm run check`, `npm run deploy:dry-run`, and `npm audit --audit-level=high`.
+The audit includes development tools because they execute during development and deployment.
+It can fail on a newly disclosed dependency vulnerability even when all tests pass.
+Update the affected upstream dependency and commit both `package.json` and `package-lock.json`;
+do not bypass the audit or use `npm audit fix --force` to make CI pass.
+CI also runs daily at 06:17 UTC on `main` to detect new advisories without waiting for a PR,
+and can be started manually from GitHub Actions.
+
+For async UI regression tests, wait for the mocked response to finish processing before asserting
+that stale data was ignored. Verify that removing the relevant guard makes the test fail.
+Close JSDOM windows in `afterEach` so cleanup also runs after a failed assertion.
 
 ## Pull request process
 
 1. **Fork** the repo and create a feature branch from `main`.
 2. **Make your change.** Keep the diff focused — one logical change per PR.
 3. **Update [README.md](README.md)** if you add/change a user-visible feature or an API endpoint.
-4. **Test locally** with `npm run dev`. Verify the dashboard still loads and the affected feature works end-to-end. CI also runs `npm run check`, the Wrangler dry-run, and `npm audit`.
+4. **Test locally** with `npm run dev`. Verify the dashboard still loads and the affected feature works end-to-end. Run `npm run check:ci` for the automated checks, Wrangler dry-run, and dependency audit.
 5. **Open a PR** against `main`. The PR title becomes the squash-merge commit message, so make it descriptive (e.g. `Add CSV export filter for ASN`).
 6. **Wait for review.** Copilot code review runs automatically; a maintainer will follow up.
 
