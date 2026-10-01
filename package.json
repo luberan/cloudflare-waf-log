@@ -11,13 +11,14 @@
     "check:frontend": "node --check public/app.js",
     "test": "vitest run",
     "deploy:dry-run": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
-    "check": "npm run typecheck && npm run check:frontend && npm test"
+    "check": "npm run typecheck && npm run check:frontend && npm test",
+    "check:ci": "npm run check && npm run deploy:dry-run && npm audit --audit-level=high"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260922.1",
     "jsdom": "^30.1.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1",
+    "vitest": "^5.0.2",
     "wrangler": "^4.136.2"
   },
   "overrides": {
