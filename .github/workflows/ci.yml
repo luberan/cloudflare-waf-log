@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,7 +19,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run check
-      - run: npm run deploy:dry-run
-      - run: npm audit --audit-level=high
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Typecheck and run tests
+        run: npm run check
+      - name: Build Worker without deploying
+        run: npm run deploy:dry-run
+      - name: Audit dependencies (high and critical)
+        run: npm audit --audit-level=high
