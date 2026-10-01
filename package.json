@@ -15,7 +15,7 @@
     "check:ci": "npm run check && npm run deploy:dry-run && npm audit --audit-level=high"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260922.1",
+    "@cloudflare/workers-types": "^5.20260927.1",
     "jsdom": "^30.1.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2",
