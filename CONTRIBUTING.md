@@ -67,8 +67,11 @@ npm run check:ci
 This runs `npm run check`, `npm run deploy:dry-run`, and `npm audit --audit-level=high`.
 The audit includes development tools because they execute during development and deployment.
 It can fail on a newly disclosed dependency vulnerability even when all tests pass.
-Update the affected upstream dependency and commit both `package.json` and `package-lock.json`;
-do not bypass the audit or use `npm audit fix --force` to make CI pass.
+Update the affected dependency; do not bypass the audit or use `npm audit fix --force` to make CI pass.
+For a direct dependency, commit both `package.json` and `package-lock.json`.
+For a compatible transitive fix, use `npm update <package> --package-lock-only` and commit
+`package-lock.json`; no override is needed when the existing version ranges accept the fix.
+Then run `npm ci` and `npm run check:ci` to verify the locked dependency tree.
 CI also runs daily at 06:17 UTC on `main` to detect new advisories without waiting for a PR,
 and can be started manually from GitHub Actions.
 
