@@ -71,9 +71,17 @@ Update the affected dependency; do not bypass the audit or use `npm audit fix --
 For a direct dependency, commit both `package.json` and `package-lock.json`.
 For a compatible transitive fix, use `npm update <package> --package-lock-only` and commit
 `package-lock.json`; no override is needed when the existing version ranges accept the fix.
+If an upstream tool pins the vulnerable version and no patched tool release is available,
+use a version-scoped override for a patched compatible major (for example,
+`"undici@^7.0.0": "^7.30.1"`). Do not force other major versions onto that version.
+Regenerate `package-lock.json` with `npm install --package-lock-only`, and remove the override
+once the upstream dependency resolves to a patched version without it.
 Then run `npm ci` and `npm run check:ci` to verify the locked dependency tree.
+Dependabot checks npm releases every day at 04:17 UTC, including weekends, so upstream fixes
+are proposed sooner. Update PRs still need to be reviewed and merged.
 CI also runs daily at 06:17 UTC on `main` to detect new advisories without waiting for a PR,
-and can be started manually from GitHub Actions.
+and can be started manually from GitHub Actions. A newly disclosed vulnerability can still
+fail CI until its fix is merged; the audit must remain enabled.
 
 For async UI regression tests, wait for the mocked response to finish processing before asserting
 that stale data was ignored. Verify that removing the relevant guard makes the test fail.
