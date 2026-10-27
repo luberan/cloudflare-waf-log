@@ -120,7 +120,7 @@ For **each CF account** create THREE secrets:
 
 ### Local development
 
-Use Node.js 22 or newer (CI runs Node.js 22).
+Use Node.js 22 or newer (CI tests Node.js 22 and 24).
 
 ```powershell
 npm ci
@@ -141,8 +141,12 @@ Open <http://localhost:8787>.
 Run all automated checks without Cloudflare credentials:
 
 ```powershell
+npx playwright install chromium
 npm run check:ci
 ```
+
+Install Chromium again after updating Playwright. Browser smoke tests use synthetic API responses
+and the real self-hosted Chart.js bundle; they do not contact Cloudflare or need account tokens.
 
 ### Production — Worker secrets
 
