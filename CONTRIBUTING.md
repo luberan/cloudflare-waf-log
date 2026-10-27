@@ -27,7 +27,7 @@ Features that would require a paid CF plan, a build pipeline, or persistent stor
 
 ## Development setup
 
-Use Node.js 22 or newer (CI runs Node.js 22).
+Use Node.js 22 or newer (CI tests Node.js 22 and 24).
 
 ```powershell
 git clone https://github.com/<your-fork>/cloudflare-waf-log.git
@@ -61,10 +61,16 @@ See the [README](README.md#cloudflare-api-token--how-to-create-one) for token cr
 Run the same checks as CI, including a production dry-run and dependency audit, before pushing:
 
 ```powershell
+npx playwright install chromium
 npm run check:ci
 ```
 
-This runs `npm run check`, `npm run deploy:dry-run`, and `npm audit --audit-level=high`.
+Install Chromium once after `npm ci`, and again after updating Playwright.
+This runs `npm run check`, `npm run test:browser`, `npm run deploy:dry-run`, and
+`npm audit --audit-level=high`. On Linux, use `npx playwright install --with-deps chromium`
+if browser system libraries are missing.
+Browser smoke tests use synthetic API responses and the real vendored Chart.js in Chromium.
+They do not start a development server, contact Cloudflare, or use account tokens.
 The audit includes development tools because they execute during development and deployment.
 It can fail on a newly disclosed dependency vulnerability even when all tests pass.
 Update the affected dependency; do not bypass the audit or use `npm audit fix --force` to make CI pass.
@@ -78,10 +84,29 @@ Regenerate `package-lock.json` with `npm install --package-lock-only`, and remov
 once the upstream dependency resolves to a patched version without it.
 Then run `npm ci` and `npm run check:ci` to verify the locked dependency tree.
 Dependabot checks npm releases every day at 04:17 UTC, including weekends, so upstream fixes
-are proposed sooner. Update PRs still need to be reviewed and merged.
+are proposed sooner. GitHub Actions dependencies are checked weekly, including pinned commit SHAs.
+Update PRs still need to be reviewed and merged.
 CI also runs daily at 06:17 UTC on `main` to detect new advisories without waiting for a PR,
 and can be started manually from GitHub Actions. A newly disclosed vulnerability can still
 fail CI until its fix is merged; the audit must remain enabled.
+Push checks run only on `main`; pull requests are always checked, and superseded PR runs are cancelled.
+The stable `check` status requires both Node.js versions, browser tests, and PR dependency review.
+The `main` ruleset requires that status and CodeQL results without high or critical security findings.
+
+### Updating vendored Chart.js
+
+Chart.js is a development dependency so Dependabot, dependency review, and `npm audit` can track it.
+The deployed frontend still uses checked-in assets and needs no install or build step.
+After a Chart.js update, including a Dependabot PR, regenerate its bundle and license:
+
+```powershell
+npm ci
+npm run vendor:chart
+npm run check:ci
+```
+
+Commit both vendored files together with the dependency changes. `npm run check:vendor` rejects
+copies that differ from the locked npm package, allowing only Git's line-ending conversion.
 
 For async UI regression tests, wait for the mocked response to finish processing before asserting
 that stale data was ignored. Verify that removing the relevant guard makes the test fail.

@@ -11,3 +11,8 @@ updates:
       interval: "cron"
       cronjob: "17 4 * * *"
     open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
