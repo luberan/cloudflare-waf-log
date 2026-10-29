@@ -18,7 +18,7 @@
     "check:ci": "npm run check && npm run test:browser && npm run deploy:dry-run && npm audit --audit-level=high"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261025.1",
+    "@cloudflare/workers-types": "^5.20261026.1",
     "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
     "chart.js": "^4.6.1",
