@@ -42,7 +42,7 @@ jobs:
         run: npm run deploy:dry-run
       - name: Audit dependencies (high and critical)
         if: matrix.node == 22
-        run: npm audit --audit-level=high
+        run: node scripts/audit-dependencies.mjs
 
   browser:
     name: Browser smoke tests
