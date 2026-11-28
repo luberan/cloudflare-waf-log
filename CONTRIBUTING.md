@@ -27,7 +27,7 @@ Features that would require a paid CF plan, a build pipeline, or persistent stor
 
 ## Development setup
 
-Use Node.js 22 or newer (CI tests Node.js 22 and 24).
+Use Node.js 22 or newer (CI tests Node.js 22, 24 and 26).
 
 ```powershell
 git clone https://github.com/<your-fork>/cloudflare-waf-log.git

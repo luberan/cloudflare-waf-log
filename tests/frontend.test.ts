@@ -375,3 +375,32 @@ describe("dashboard filters and accessibility", () => {
     expect(dashboard.document.querySelectorAll('canvas[role="img"][aria-label]').length).toBeGreaterThan(0);
   });
 });
+
+describe("dashboard API error handling", () => {
+  function dashboardWithFetch(fetchImpl: (url: URL, init?: RequestInit) => unknown) {
+    const dom = new JSDOM(html, { url: "https://dashboard.test/", runScripts: "outside-only", pretendToBeVisual: true });
+    dashboards.add(dom);
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) =>
+      fetchImpl(new URL(String(input), dom.window.location.href), init));
+    Object.assign(dom.window, { Chart: class { destroy() {} }, fetch });
+    dom.window.eval(appScript);
+    return { document: dom.window.document, fetch };
+  }
+
+  it("tells the user to reload when Cloudflare Access redirects an expired session", async () => {
+    const { document, fetch } = dashboardWithFetch(() => ({ ok: false, type: "opaqueredirect", status: 0, statusText: "" }));
+
+    await waitUntil(() => Boolean(document.querySelector("#error")?.textContent));
+    expect(document.querySelector("#error")?.textContent).toMatch(/Access session has expired/);
+    expect(fetch.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("shows the API's error message instead of raw JSON", async () => {
+    const { document } = dashboardWithFetch(() => ({
+      ok: false, status: 502, statusText: "Bad Gateway", json: async () => ({ error: "Cloudflare GraphQL error: quota exceeded" }),
+    }));
+
+    await waitUntil(() => Boolean(document.querySelector("#error")?.textContent));
+    expect(document.querySelector("#error")?.textContent).toBe("Cloudflare GraphQL error: quota exceeded");
+  });
+});

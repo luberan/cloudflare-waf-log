@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>Cloudflare Dashboard</title>
+<link rel="icon" href="data:," />
 <script src="/vendor/chart.umd.min.js"></script>
 <style>
   :root {
@@ -141,7 +142,7 @@
   <section class="panel col-3 stat"><span class="l">Challenge</span><span class="v" id="kpiChallenge">–</span></section>
   <section class="panel col-3 stat"><span class="l">Allow / Log</span><span class="v" id="kpiAllow">–</span></section>
 
-  <section class="panel col-8"><h2>Events over time (hourly)</h2><div class="chart-wrap tall"><canvas id="chartSeries" role="img" aria-label="Sampled WAF rows over time"></canvas></div></section>
+  <section class="panel col-8"><h2>Events over time (hourly, UTC)</h2><div class="chart-wrap tall"><canvas id="chartSeries" role="img" aria-label="Sampled WAF rows over time"></canvas></div></section>
   <section class="panel col-4"><h2>By action</h2><div class="chart-wrap"><canvas id="chartAction" role="img" aria-label="Sampled WAF rows by action"></canvas></div></section>
 
   <section class="panel col-6"><h2>Top countries <span class="muted">(click = filter)</span></h2><div class="chart-wrap"><canvas id="chartCountry" role="img" aria-label="Top countries by sampled WAF rows"></canvas></div><div id="chartCountryControls" class="chart-a11y-controls" aria-label="Country filter options"></div></section>
@@ -157,7 +158,7 @@
 
   <section class="panel col-12"><h2>Events <span class="muted" id="eventsCount"></span></h2>
     <div class="scroll"><table id="tblEvents"><thead><tr>
-      <th>Time</th><th>Action</th><th>Source</th><th>Country</th><th>IP</th><th>ASN</th><th>Host</th><th>Path</th><th>Method</th><th>Rule</th><th>Ray</th>
+      <th>Time (UTC)</th><th>Action</th><th>Source</th><th>Country</th><th>IP</th><th>ASN</th><th>Host</th><th>Path</th><th>Method</th><th>Rule</th><th>Ray</th>
     </tr></thead><tbody></tbody></table></div>
   </section>
 </main>

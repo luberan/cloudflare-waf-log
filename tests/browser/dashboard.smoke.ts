@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { expect, test as base, type Page } from "@playwright/test";
+import { staticSecurityHeaders } from "../../src/security-headers";
 
 const csv = "datetime,action\r\n2026-10-20T12:00:00Z,block\r\n";
 const assets = new Map([
@@ -92,16 +93,16 @@ const test = base.extend({
       if (url.origin !== "https://dashboard.test") throw new Error(`Unexpected external request: ${url}`);
       const asset = assets.get(url.pathname);
       if (asset) {
+        // Serve every asset under the production security headers, so a CSP violation (for
+        // example a newly added inline script) fails the smoke test as a console error.
         await route.fulfill({
           path: fileURLToPath(new URL(asset.path, import.meta.url)),
           contentType: asset.contentType,
+          headers: staticSecurityHeaders(),
         });
         return;
       }
       switch (url.pathname) {
-        case "/favicon.ico":
-          await route.fulfill({ status: 204 });
-          return;
         case "/api/accounts":
           await route.fulfill({ json: { accounts: [{ id: "smoke", label: "Smoke account" }] } });
           return;
