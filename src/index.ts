@@ -34,6 +34,8 @@
  * development must explicitly set ALLOW_UNAUTHENTICATED_LOCAL_DEV=true.
  */
 
+import { staticSecurityHeaders } from "./security-headers";
+
 export interface Env {
   ASSETS: Fetcher;
   // CFACC_*_LABEL / _ACCOUNT / _TOKEN per account; CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD in
@@ -87,6 +89,24 @@ export type Filters = {
   limit?: number;
 };
 
+/** One raw row of `firewallEventsAdaptive`, as selected by the Events query. */
+type WafEvent = {
+  datetime?: string;
+  action?: string;
+  source?: string;
+  clientIP?: string;
+  // Cloudflare serializes this UInt32 as a string in raw rows; tolerate a number as well.
+  clientAsn?: string | number | null;
+  clientCountryName?: string;
+  clientASNDescription?: string;
+  clientRequestHTTPHost?: string;
+  clientRequestPath?: string;
+  clientRequestHTTPMethodName?: string;
+  userAgent?: string;
+  ruleId?: string;
+  rayName?: string;
+};
+
 const MAX_FILTER_VALUES = 100;
 const MAX_FILTER_VALUE_LENGTH = 4096;
 const MAX_ANALYTICS_RANGE_SECONDS = 31 * 24 * 60 * 60;
@@ -135,34 +155,39 @@ class HttpError extends Error {
   }
 }
 
-// Security headers applied to every static asset response. The dashboard self-hosts all of its
-// scripts (Chart.js lives in /vendor, the app logic in /app.js), so the CSP can lock scripts to
-// same-origin. Cloudflare Bot JavaScript Detections recognizes a nonce in the response CSP and adds
-// it to the inline snippet it injects later at the edge. Inline styles / style attributes are still
-// used, hence 'unsafe-inline' for style only.
-const STATIC_SECURITY_HEADERS: Record<string, string> = {
-  "x-content-type-options": "nosniff",
-  "referrer-policy": "no-referrer",
-  "x-frame-options": "DENY",
-};
+/**
+ * A non-2xx or malformed response from the Cloudflare REST / GraphQL API. Surfaced to the dashboard
+ * as 502 (or 429 when Cloudflare rate-limits us) with Cloudflare's own error text, instead of an
+ * opaque 500, so that e.g. a missing token permission or an exhausted GraphQL quota is diagnosable.
+ */
+class UpstreamError extends HttpError {
+  constructor(
+    readonly upstreamStatus: number,
+    message: string,
+  ) {
+    super(upstreamStatus === 429 ? 429 : 502, message);
+  }
+}
 
-function contentSecurityPolicy(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(18));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  const nonce = btoa(binary);
-  return (
-    "default-src 'self'; " +
-    `script-src 'self' 'nonce-${nonce}'; ` +
-    "style-src 'self' 'unsafe-inline'; " +
-    "img-src 'self' data:; " +
-    "font-src 'self'; " +
-    "connect-src 'self'; " +
-    "frame-ancestors 'none'; " +
-    "base-uri 'none'; " +
-    "object-src 'none'; " +
-    "form-action 'self'"
-  );
+const MAX_UPSTREAM_MESSAGE_LENGTH = 300;
+
+function upstreamMessages(errors: unknown): string {
+  const list = Array.isArray(errors) ? errors : [];
+  const text = list
+    .map((e) => (e && typeof e === "object" && "message" in e ? String((e as { message: unknown }).message) : ""))
+    .filter(Boolean)
+    .join("; ");
+  return text.length > MAX_UPSTREAM_MESSAGE_LENGTH ? `${text.slice(0, MAX_UPSTREAM_MESSAGE_LENGTH)}…` : text;
+}
+
+async function readUpstreamJson<T>(res: Response, api: string): Promise<T> {
+  try {
+    return (await res.json()) as T;
+  } catch (e) {
+    // Timeouts must keep propagating so timedFetch can map them to 504.
+    if (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")) throw e;
+    throw new UpstreamError(res.status, `Cloudflare ${api} returned a non-JSON response (HTTP ${res.status})`);
+  }
 }
 
 // Accounts are derived from Worker secrets which cannot change without a redeploy (and a redeploy
@@ -179,8 +204,10 @@ function loadAccounts(env: Env): Account[] {
   for (const key of Object.keys(env)) {
     const m = key.match(/^CFACC_([A-Z0-9_]+)_(LABEL|ACCOUNT|TOKEN)$/i);
     if (!m) continue;
-    const val = env[key];
-    if (typeof val !== "string") continue;
+    // Trim: secrets piped in from a shell (`"…" | wrangler secret put`) easily pick up a trailing
+    // newline, which would break the Authorization header and the zone-ownership comparison.
+    const val = typeof env[key] === "string" ? (env[key] as string).trim() : undefined;
+    if (!val) continue;
     const id = m[1].toUpperCase();
     const kind = m[2].toUpperCase();
     const entry = parts.get(id) ?? {};
@@ -221,9 +248,7 @@ function pickAccount(env: Env, url: URL): Account {
 }
 
 export function parseFilters(url: URL): Filters {
-  const zone = url.searchParams.get("zone");
-  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
-  if (zone.length > 128) throw new HttpError(400, "invalid 'zone' query parameter");
+  const zone = requireZone(url);
 
   const now = Date.now();
   const since = isoQueryValue(url, "since", now - 24 * 60 * 60 * 1000);
@@ -279,19 +304,31 @@ export function parseFilters(url: URL): Filters {
   };
 }
 
-async function cfFetch<T>(acc: Account, path: string): Promise<T> {
+type RestEnvelope<T> = {
+  success?: boolean;
+  result: T;
+  errors?: unknown;
+  result_info?: { page?: number; total_pages?: number };
+};
+
+async function cfFetchEnvelope<T>(acc: Account, path: string): Promise<RestEnvelope<T>> {
   return timedFetch(`${CF_API}${path}`, {
     headers: {
       authorization: `Bearer ${acc.token}`,
       "content-type": "application/json",
     },
   }, async (res) => {
-    const body = (await res.json()) as { success: boolean; result: T; errors?: unknown };
-    if (!res.ok || !body.success) {
-      throw new Error(`Cloudflare API ${res.status}: ${JSON.stringify(body.errors ?? body)}`);
+    const body = await readUpstreamJson<RestEnvelope<T>>(res, "API");
+    if (!res.ok || !body?.success) {
+      const detail = upstreamMessages(body?.errors);
+      throw new UpstreamError(res.status, `Cloudflare API error (HTTP ${res.status})${detail ? `: ${detail}` : ""}`);
     }
-    return body.result;
+    return body;
   });
+}
+
+async function cfFetch<T>(acc: Account, path: string): Promise<T> {
+  return (await cfFetchEnvelope<T>(acc, path)).result;
 }
 
 async function gql<T>(acc: Account, query: string, variables: Record<string, unknown>): Promise<T> {
@@ -303,22 +340,38 @@ async function gql<T>(acc: Account, query: string, variables: Record<string, unk
     },
     body: JSON.stringify({ query, variables }),
   }, async (res) => {
-    const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
-    if (!res.ok || body.errors?.length) {
-      throw new Error(`GraphQL error: ${JSON.stringify(body.errors ?? res.statusText)}`);
+    const body = await readUpstreamJson<{ data?: T; errors?: unknown[] }>(res, "GraphQL API");
+    if (!res.ok || body?.errors?.length || !body?.data) {
+      const detail = upstreamMessages(body?.errors) || res.statusText;
+      throw new UpstreamError(res.status, `Cloudflare GraphQL error${detail ? `: ${detail}` : ""}`);
     }
-    return body.data as T;
+    return body.data;
   });
 }
 
-async function assertAccountZone(acc: Account, zone: string | null): Promise<void> {
+// Cloudflare zone tags are 32 hex characters; the looser charset still rules out path segments such
+// as "." or ".." that would otherwise be normalized away inside the REST URL.
+const ZONE_TAG_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+function requireZone(url: URL): string {
+  const zone = url.searchParams.get("zone");
   if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
-  if (zone.length > 128) throw new HttpError(400, "invalid 'zone' query parameter");
-  const details = await cfFetch<{ id: string; account?: { id: string } }>(
-    acc,
-    `/zones/${encodeURIComponent(zone)}`,
-  );
-  if (details.id !== zone || details.account?.id !== acc.accountId) {
+  if (!ZONE_TAG_PATTERN.test(zone)) throw new HttpError(400, "invalid 'zone' query parameter");
+  return zone;
+}
+
+async function assertAccountZone(acc: Account, zone: string): Promise<void> {
+  let details: { id: string; account?: { id: string } };
+  try {
+    details = await cfFetch(acc, `/zones/${encodeURIComponent(zone)}`);
+  } catch (e) {
+    // Unknown zone, or one the account token cannot read: a client error, not a server failure.
+    if (e instanceof UpstreamError && [400, 403, 404].includes(e.upstreamStatus)) {
+      throw new HttpError(404, "zone not found or not readable with the selected account's token");
+    }
+    throw e;
+  }
+  if (details?.id !== zone || details.account?.id !== acc.accountId) {
     throw new HttpError(403, "zone does not belong to the selected account");
   }
 }
@@ -336,18 +389,23 @@ function listAccounts(env: Env): Response {
   return json({ accounts });
 }
 
+const ZONES_PER_PAGE = 50;
+// Hard stop against a misbehaving upstream that never returns a short page (10 000 zones).
+const MAX_ZONE_PAGES = 200;
+
 async function listZones(acc: Account): Promise<Response> {
   type Zone = { id: string; name: string; status: string; plan: { name: string } };
   const all: Zone[] = [];
-  let page = 1;
-  while (true) {
-    const result = await cfFetch<Zone[]>(
+  for (let page = 1; page <= MAX_ZONE_PAGES; page++) {
+    const { result, result_info: info } = await cfFetchEnvelope<Zone[]>(
       acc,
-      `/zones?account.id=${encodeURIComponent(acc.accountId)}&per_page=50&page=${page}`,
+      `/zones?account.id=${encodeURIComponent(acc.accountId)}&per_page=${ZONES_PER_PAGE}&page=${page}`,
     );
-    all.push(...result);
-    if (result.length < 50) break;
-    page++;
+    const zones = Array.isArray(result) ? result : [];
+    all.push(...zones);
+    // Prefer Cloudflare's page count (saves a trailing empty request when the zone count is an exact
+    // multiple of the page size); fall back to the short-page heuristic when it is absent.
+    if (typeof info?.total_pages === "number" ? page >= info.total_pages : zones.length < ZONES_PER_PAGE) break;
   }
   return json({
     zones: all
@@ -356,7 +414,7 @@ async function listZones(acc: Account): Promise<Response> {
   });
 }
 
-async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any[]> {
+async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<WafEvent[]> {
   const query = /* GraphQL */ `
     query Events(
       $zoneTag: String!
@@ -402,7 +460,7 @@ async function fetchEvents(acc: Account, f: Filters, limit: number): Promise<any
   if (f.clientAsn?.length) filter.clientAsn_in = f.clientAsn;
   if (f.userAgent?.length) filter.userAgent_in = f.userAgent;
 
-  type Resp = { viewer: { zones: { firewallEventsAdaptive: any[] }[] } };
+  type Resp = { viewer: { zones: { firewallEventsAdaptive: WafEvent[] }[] } };
   const data = await gql<Resp>(acc, query, { zoneTag: f.zoneTag, limit, filter });
   return data.viewer.zones[0]?.firewallEventsAdaptive ?? [];
 }
@@ -450,7 +508,7 @@ async function cachedFetchEvents(
   acc: Account,
   f: Filters,
   limit: number,
-): Promise<{ events: any[]; cacheState: CacheState }> {
+): Promise<{ events: WafEvent[]; cacheState: CacheState }> {
   const keyUrl = new URL("https://waf-cache.internal/v2/events");
   keyUrl.searchParams.set("account", acc.accountId);
   keyUrl.searchParams.set("scope", await accountCacheScope(acc));
@@ -470,7 +528,7 @@ async function getEvents(acc: Account, f: Filters): Promise<Response> {
   return json({ events, range: prepared.range });
 }
 
-const CSV_COLUMNS: { header: string; key: string }[] = [
+const CSV_COLUMNS: { header: string; key: keyof WafEvent }[] = [
   { header: "datetime", key: "datetime" },
   { header: "action", key: "action" },
   { header: "source", key: "source" },
@@ -500,7 +558,7 @@ async function exportCsv(acc: Account, f: Filters): Promise<Response> {
   const events = await fetchEvents(acc, f, 10000);
   const lines = [CSV_COLUMNS.map((c) => c.header).join(",")];
   for (const e of events) {
-    lines.push(CSV_COLUMNS.map((c) => csvEscape((e as Record<string, unknown>)[c.key])).join(","));
+    lines.push(CSV_COLUMNS.map((c) => csvEscape(e[c.key])).join(","));
   }
   // UTF-8 BOM so Excel opens it with correct encoding.
   const body = "\uFEFF" + lines.join("\r\n") + "\r\n";
@@ -555,19 +613,19 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   // Cloudflare serializes clientAsn as a string in raw event rows, while the filter input is UInt32.
   const fAsn = f.clientAsn?.length ? new Set(f.clientAsn.map(String)) : null;
   const fUa = f.userAgent?.length ? new Set(f.userAgent) : null;
-  const matches = (e: any, exclude?: Facet): boolean => {
-    if (exclude !== "country" && fCountry && !fCountry.has(e.clientCountryName)) return false;
-    if (exclude !== "host" && fHost && !fHost.has(e.clientRequestHTTPHost)) return false;
-    if (exclude !== "path" && fPath && !fPath.has(e.clientRequestPath)) return false;
-    if (exclude !== "rule" && fRule && !fRule.has(e.ruleId)) return false;
+  const matches = (e: WafEvent, exclude?: Facet): boolean => {
+    if (exclude !== "country" && fCountry && !fCountry.has(e.clientCountryName ?? "")) return false;
+    if (exclude !== "host" && fHost && !fHost.has(e.clientRequestHTTPHost ?? "")) return false;
+    if (exclude !== "path" && fPath && !fPath.has(e.clientRequestPath ?? "")) return false;
+    if (exclude !== "rule" && fRule && !fRule.has(e.ruleId ?? "")) return false;
     if (exclude !== "asn" && fAsn && !fAsn.has(String(e.clientAsn ?? 0))) return false;
-    if (exclude !== "ua" && fUa && !fUa.has(e.userAgent)) return false;
+    if (exclude !== "ua" && fUa && !fUa.has(e.userAgent ?? "")) return false;
     return true;
   };
 
   const filtered = events.filter((e) => matches(e));
 
-  const counter = (src: any[], key: (e: any) => string | undefined) => {
+  const counter = (src: WafEvent[], key: (e: WafEvent) => string | null | undefined) => {
     const m = new Map<string, number>();
     for (const e of src) {
       const k = key(e) ?? "(unknown)";
@@ -606,7 +664,8 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
   // Hourly time series, per action — from the filtered set.
   const seriesMap = new Map<string, number>(); // key: "hour|action"
   for (const e of filtered) {
-    const hour = (e.datetime as string).slice(0, 13) + ":00:00Z";
+    if (typeof e.datetime !== "string") continue;
+    const hour = e.datetime.slice(0, 13) + ":00:00Z";
     const k = `${hour}|${e.action}`;
     seriesMap.set(k, (seriesMap.get(k) ?? 0) + 1);
   }
@@ -660,9 +719,7 @@ async function getSummary(acc: Account, f: Filters): Promise<Response> {
 type HttpRange = { zoneTag: string; sinceIso: string; untilIso: string };
 
 export function parseHttpRange(url: URL): HttpRange {
-  const zone = url.searchParams.get("zone");
-  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
-  if (zone.length > 128) throw new HttpError(400, "invalid 'zone' query parameter");
+  const zone = requireZone(url);
   const now = Date.now();
   const until = isoQueryValue(url, "until", now);
   const since = isoQueryValue(url, "since", now - 24 * 60 * 60 * 1000);
@@ -1367,8 +1424,7 @@ async function getHttpStats(acc: Account, url: URL): Promise<Response> {
 // depends on the zone's plan, so we ask Cloudflare instead of hard-coding a guess. The dashboard
 // uses this to populate the time-range dropdown with everything the zone is actually allowed to read.
 async function getHttpSettings(acc: Account, url: URL): Promise<Response> {
-  const zone = url.searchParams.get("zone");
-  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  const zone = requireZone(url);
   const limits = await httpLimitsSeconds(acc, zone);
   return json(limits, {
     headers: { "cache-control": limits.maxRangeSeconds > 0 ? "private, max-age=300" : "no-store" },
@@ -1376,8 +1432,7 @@ async function getHttpSettings(acc: Account, url: URL): Promise<Response> {
 }
 
 async function getWafSettings(acc: Account, url: URL): Promise<Response> {
-  const zone = url.searchParams.get("zone");
-  if (!zone) throw new HttpError(400, "missing 'zone' query parameter");
+  const zone = requireZone(url);
   const limit = await wafLimitSeconds(acc, zone);
   return json(limit, {
     headers: { "cache-control": limit.source === "cloudflare" ? "private, max-age=300" : "no-store" },
@@ -1425,8 +1480,14 @@ async function getAccessJwks(teamDomain: string, refresh = false): Promise<Acces
   }
   const keys = await timedFetch(`${teamDomain}/cdn-cgi/access/certs`, { method: "GET" }, async (res) => {
     if (!res.ok) throw new HttpError(403, "unable to fetch Access signing keys");
-    const body = (await res.json()) as { keys?: AccessJwk[] };
-    return body.keys ?? [];
+    let body: { keys?: unknown };
+    try {
+      body = (await res.json()) as { keys?: unknown };
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")) throw e;
+      throw new HttpError(403, "unable to fetch Access signing keys");
+    }
+    return Array.isArray(body?.keys) ? (body.keys as AccessJwk[]) : [];
   });
   jwksCache.set(teamDomain, {
     keys,
@@ -1495,19 +1556,26 @@ async function verifyAccess(env: Env, request: Request): Promise<void> {
   }
   if (!jwk?.n || !jwk.e) throw new HttpError(403, "unknown Access signing key");
 
-  const key = await crypto.subtle.importKey(
-    "jwk",
-    { kty: "RSA", n: jwk.n, e: jwk.e, alg: "RS256", ext: true },
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const ok = await crypto.subtle.verify(
-    "RSASSA-PKCS1-v1_5",
-    key,
-    b64urlToBytes(rawSig),
-    new TextEncoder().encode(`${rawHeader}.${rawPayload}`),
-  );
+  // A malformed signature segment (invalid base64) or an unusable key must reject the token with 403,
+  // not escape as an unhandled 500.
+  let ok = false;
+  try {
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      { kty: "RSA", n: jwk.n, e: jwk.e, alg: "RS256", ext: true },
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    ok = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      key,
+      b64urlToBytes(rawSig),
+      new TextEncoder().encode(`${rawHeader}.${rawPayload}`),
+    );
+  } catch {
+    ok = false;
+  }
   if (!ok) throw new HttpError(403, "invalid Access token signature");
 
   const nowSeconds = Math.floor(Date.now() / 1000);
@@ -1525,6 +1593,16 @@ async function verifyAccess(env: Env, request: Request): Promise<void> {
 
 // ── Entrypoint ────────────────────────────────────────────────────────────────
 
+// Zone-scoped endpoints; each runs only after the zone was verified to belong to the account.
+const ZONE_ROUTES = new Map<string, (account: Account, url: URL) => Promise<Response>>([
+  ["/api/log", (account, url) => getEvents(account, parseFilters(url))],
+  ["/api/stats", (account, url) => getSummary(account, parseFilters(url))],
+  ["/api/http-stats", getHttpStats],
+  ["/api/http-settings", getHttpSettings],
+  ["/api/waf-settings", getWafSettings],
+  ["/api/export.csv", (account, url) => exportCsv(account, parseFilters(url))],
+]);
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -1532,8 +1610,7 @@ export default {
     if (!url.pathname.startsWith("/api/")) {
       const res = await env.ASSETS.fetch(request);
       const headers = new Headers(res.headers);
-      for (const [k, v] of Object.entries(STATIC_SECURITY_HEADERS)) headers.set(k, v);
-      headers.set("content-security-policy", contentSecurityPolicy());
+      for (const [k, v] of Object.entries(staticSecurityHeaders())) headers.set(k, v);
       // Always revalidate assets so a redeploy takes effect immediately instead of serving a stale
       // app.js/index.html from the browser or edge cache (the dashboard is small — 304s are cheap).
       headers.set("cache-control", "no-cache");
@@ -1541,27 +1618,23 @@ export default {
     }
 
     try {
+      // The API is read-only; refusing other methods keeps it from ever acting on a cross-site form post.
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return json({ error: "method not allowed" }, { status: 405, headers: { allow: "GET, HEAD" } });
+      }
+
       await verifyAccess(env, request);
 
       if (url.pathname === "/api/accounts") return listAccounts(env);
 
+      const zoneRoute = ZONE_ROUTES.get(url.pathname);
+      if (url.pathname !== "/api/zones" && !zoneRoute) return err(404, "not found");
+
       const account = pickAccount(env, url);
+      if (!zoneRoute) return await listZones(account);
 
-      if (url.pathname === "/api/zones") return await listZones(account);
-      const zoneEndpoints = [
-        "/api/log", "/api/stats", "/api/http-stats", "/api/http-settings", "/api/waf-settings", "/api/export.csv",
-      ];
-      if (!zoneEndpoints.includes(url.pathname)) return err(404, "not found");
-      await assertAccountZone(account, url.searchParams.get("zone"));
-
-      if (url.pathname === "/api/log") return await getEvents(account, parseFilters(url));
-      if (url.pathname === "/api/stats") return await getSummary(account, parseFilters(url));
-      if (url.pathname === "/api/http-stats") return await getHttpStats(account, url);
-      if (url.pathname === "/api/http-settings") return await getHttpSettings(account, url);
-      if (url.pathname === "/api/waf-settings") return await getWafSettings(account, url);
-      if (url.pathname === "/api/export.csv") return await exportCsv(account, parseFilters(url));
-
-      return err(404, "not found");
+      await assertAccountZone(account, requireZone(url));
+      return await zoneRoute(account, url);
     } catch (e) {
       if (e instanceof HttpError) return err(e.status, e.message);
       console.error("Unhandled API error:", e);

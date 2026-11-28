@@ -873,3 +873,159 @@ describe("HTTP aggregation", () => {
     expect(body.totals.uniqueIps).toBe(1);
   });
 });
+
+describe("Audit hardening", () => {
+  beforeEach(() => {
+    vi.stubGlobal("caches", {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects non-GET API methods before touching upstream", async () => {
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await worker.fetch(
+      new Request("http://127.0.0.1/api/accounts", { method: "POST" }),
+      configuredEnv(),
+    );
+
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET, HEAD");
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("answers unknown API routes with 404 even without an account parameter", async () => {
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/nope"), configuredEnv());
+
+    expect(response.status).toBe(404);
+  });
+
+  it.each([".", "..", "a/b", "x".repeat(65)])("rejects the malformed zone %s without an upstream call", async (zone) => {
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const params = new URLSearchParams({ account: "test", zone });
+
+    const response = await worker.fetch(new Request(`http://127.0.0.1/api/stats?${params}`), configuredEnv());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid 'zone' query parameter" });
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it.each([403, 404])("maps an unreadable zone (upstream %i) to 404 instead of 500", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(
+      { success: false, errors: [{ code: 1001, message: "Invalid zone identifier" }] },
+      { status },
+    )));
+
+    const response = await worker.fetch(
+      new Request("http://127.0.0.1/api/stats?account=test&zone=unreadable"),
+      configuredEnv(),
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("surfaces Cloudflare GraphQL errors as 502 with their message", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) =>
+      zoneDetailsResponse(input) ?? Response.json({ data: null, errors: [{ message: "quota exceeded" }] }),
+    ));
+    const params = timeParams();
+    params.set("account", "test");
+    params.set("zone", "zone-graphql-error");
+
+    const response = await worker.fetch(new Request(`http://127.0.0.1/api/log?${params}`), configuredEnv());
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({ error: "Cloudflare GraphQL error: quota exceeded" });
+  });
+
+  it("passes a Cloudflare rate limit through as 429", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(
+      { success: false, errors: [{ message: "rate limited" }] },
+      { status: 429 },
+    )));
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(429);
+  });
+
+  it("maps a non-JSON upstream body to 502", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("<html>bad gateway</html>", { status: 502 })));
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Cloudflare API returned a non-JSON response (HTTP 502)",
+    });
+  });
+
+  it("stops paginating zones at Cloudflare's reported page count", async () => {
+    const upstream = vi.fn(async () => Response.json({
+      success: true,
+      result: Array.from({ length: 50 }, (_, index) => ({ id: `z${index}`, name: `${index}.example`, plan: { name: "Free" } })),
+      result_info: { page: 1, total_pages: 1 },
+    }));
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it("trims whitespace that shell piping adds to account secrets", async () => {
+    const upstream = vi.fn(async (input: unknown, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-token");
+      return zoneDetailsResponse(input) ?? Response.json({ success: true, result: [] });
+    });
+    vi.stubGlobal("fetch", upstream);
+    const env = configuredEnv({
+      CFACC_TEST_LABEL: "Test account\r\n",
+      CFACC_TEST_ACCOUNT: "00000000000000000000000000000000\r\n",
+      CFACC_TEST_TOKEN: "test-token\n",
+    });
+
+    const accounts = await worker.fetch(new Request("http://127.0.0.1/api/accounts"), env);
+    const settings = await worker.fetch(
+      new Request("http://127.0.0.1/api/waf-settings?account=test&zone=zone-trimmed"),
+      env,
+    );
+
+    await expect(accounts.json()).resolves.toEqual({ accounts: [{ id: "test", label: "Test account" }] });
+    expect(settings.status).toBe(200);
+  });
+
+  it("rejects a token with a malformed signature segment as 403, not 500", async () => {
+    const teamDomain = "https://malformed-signature.cloudflareaccess.com";
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ keys: [{ kid: "k", n: "AQAB", e: "AQAB" }] })));
+    const token = [
+      encode({ alg: "RS256", kid: "k" }),
+      encode({ aud: "app", iss: teamDomain, exp: Math.floor(Date.now() / 1000) + 300 }),
+      "!!!not-base64!!!",
+    ].join(".");
+
+    const response = await worker.fetch(
+      new Request("https://dashboard.test/api/accounts", { headers: { "cf-access-jwt-assertion": token } }),
+      configuredEnv({ CF_ACCESS_TEAM_DOMAIN: teamDomain, CF_ACCESS_AUD: "app" }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "invalid Access token signature" });
+  });
+
+  it("adds hardening headers beyond the CSP to static assets", async () => {
+    const response = await worker.fetch(new Request("https://dashboard.test/"), configuredEnv());
+
+    expect(response.headers.get("strict-transport-security")).toMatch(/^max-age=\d+/);
+    expect(response.headers.get("cross-origin-opener-policy")).toBe("same-origin");
+    expect(response.headers.get("permissions-policy")).toContain("camera=()");
+  });
+});

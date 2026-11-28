@@ -120,7 +120,7 @@ For **each CF account** create THREE secrets:
 
 ### Local development
 
-Use Node.js 22 or newer (CI tests Node.js 22 and 24).
+Use Node.js 22 or newer (CI tests Node.js 22, 24 and 26).
 
 ```powershell
 npm ci
@@ -233,9 +233,9 @@ Keep both disabled to avoid an alternative entry point without the custom hostna
 - Tokens have read-only permissions — even a leaked secret cannot change anything in the CF accounts
 - The frontend never receives a token — `GET /api/accounts` returns only `id` + `label`
 - The Worker must sit behind Cloudflare Access, and its API also [requires a valid Access JWT](#required-api-jwt-verification)
-- All assets are served with a strict per-response `Content-Security-Policy` (`script-src 'self' 'nonce-…'`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy`. Application scripts are self-hosted. Cloudflare Bot JavaScript Detections parses the nonce and adds it to its dynamically injected snippet, without enabling general `'unsafe-inline'`
+- All assets are served with a strict per-response `Content-Security-Policy` (`script-src 'self' 'nonce-…'`, `frame-ancestors 'none'`, …) plus `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security`, `Cross-Origin-Opener-Policy` and `Permissions-Policy`. Browser smoke tests serve the dashboard under the same headers, so a CSP violation fails CI. Application scripts are self-hosted. Cloudflare Bot JavaScript Detections parses the nonce and adds it to its dynamically injected snippet, without enabling general `'unsafe-inline'`
 - CSV export escapes formula-trigger characters (`= + - @`) to prevent CSV/Excel formula injection, and the download filename is sanitised
-- Upstream REST, GraphQL and Access signing-key requests have a hard timeout covering both response headers and JSON body consumption; a timed-out required request returns `504`
+- Upstream REST, GraphQL and Access signing-key requests have a hard timeout covering both response headers and JSON body consumption; a timed-out required request returns `504`. Cloudflare API errors are returned as `502` with Cloudflare's message (`429` when Cloudflare rate-limits), and a zone the token cannot read returns `404`. The API accepts only `GET`/`HEAD`
 - `.dev.vars` is listed in [.gitignore](.gitignore)
 
 ## Possible extensions

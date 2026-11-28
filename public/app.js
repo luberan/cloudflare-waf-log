@@ -7,10 +7,38 @@ let rangeSeq = 0;
 const PALETTE = ['#e74c3c','#f1c40f','#3498db','#2ecc71','#9b59b6','#1abc9c','#e67e22','#34495e','#ff7675','#74b9ff'];
 const ACTION_COLOR = { block:'#e74c3c', managed_challenge:'#f1c40f', jschallenge:'#f39c12', challenge:'#e67e22', allow:'#2ecc71', log:'#3498db', skip:'#9b59b6' };
 
+// When the Cloudflare Access session expires, Access answers API calls with a redirect to its
+// cross-origin login page. Following it would only surface an opaque "Failed to fetch", so redirects
+// are not followed and the user is told to reload (which runs the interactive Access login).
+const SESSION_EXPIRED = 'Your Cloudflare Access session has expired. Reload the page to sign in again.';
+
+async function apiFetch(path) {
+  let r;
+  try {
+    r = await fetch(path, { redirect: 'manual', credentials: 'same-origin' });
+  } catch (e) {
+    throw new Error('Network error while contacting the dashboard API: ' + (e?.message || e));
+  }
+  if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400)) throw new Error(SESSION_EXPIRED);
+  if (!r.ok) {
+    const body = await r.json().catch(() => null);
+    throw new Error(body?.error || r.statusText || `HTTP ${r.status}`);
+  }
+  return r;
+}
+
 async function api(path) {
-  const r = await fetch(path);
-  if (!r.ok) throw new Error((await r.json().catch(()=>({error:r.statusText}))).error || r.statusText);
+  const r = await apiFetch(path);
   return r.json();
+}
+
+function cacheTag(cache) {
+  return cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
+}
+
+function showTiming(t0, cache) {
+  const tag = cacheTag(cache);
+  $('#perf').textContent = `${Math.round(performance.now() - t0)} ms` + (tag ? `  ·  ${tag}` : '');
 }
 
 function buildQuery() {
@@ -375,10 +403,7 @@ async function load(refreshWindow = true) {
     const q = buildQuery();
     const summary = await api('/api/stats?'+q);
     if (seq !== loadSeq) return; // superseded by a newer load()
-    const dur = Math.round(performance.now() - t0);
-    const cache = summary.cache || '—';
-    const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
-    $('#perf').textContent = `${dur} ms  ·  ${tag}`;
+    showTiming(t0, summary.cache);
     const events = { events: summary.events || [] };
     if (summary.range && summary.range.maxRangeSeconds) {
       const key = $('#account').value + '|' + $('#zone').value;
@@ -566,11 +591,7 @@ async function loadHttp() {
   try {
     const d = await api('/api/http-stats?' + buildBaseQuery());
     if (seq !== loadSeq) return; // superseded by a newer load
-
-    const dur = Math.round(performance.now() - t0);
-    const cache = d.cache || '—';
-    const tag = cache === 'HIT' ? '⚡ cache HIT' : (cache === 'MISS' ? '☁ cache MISS' : '');
-    $('#perf').textContent = `${dur} ms  ·  ${tag}`;
+    showTiming(t0, d.cache);
     if (d.range && d.range.maxRangeSeconds) {
       const key = $('#account').value + '|' + $('#zone').value;
       const maxH = Math.max(1, Math.floor(d.range.maxRangeSeconds / 3600));
@@ -740,11 +761,7 @@ async function init() {
       btn.disabled = true;
       showError('');
       try {
-        const r = await fetch('/api/export.csv?' + buildQuery());
-        if (!r.ok) {
-          const t = await r.text();
-          throw new Error(t || r.statusText);
-        }
+        const r = await apiFetch('/api/export.csv?' + buildQuery());
         const blob = await r.blob();
         const cd = r.headers.get('content-disposition') || '';
         const m = cd.match(/filename="?([^"]+)"?/i);
