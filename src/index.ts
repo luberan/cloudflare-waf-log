@@ -396,16 +396,31 @@ const MAX_ZONE_PAGES = 200;
 async function listZones(acc: Account): Promise<Response> {
   type Zone = { id: string; name: string; status: string; plan: { name: string } };
   const all: Zone[] = [];
+  let complete = false;
   for (let page = 1; page <= MAX_ZONE_PAGES; page++) {
-    const { result, result_info: info } = await cfFetchEnvelope<Zone[]>(
+    const { result: zones, result_info: info } = await cfFetchEnvelope<Zone[]>(
       acc,
       `/zones?account.id=${encodeURIComponent(acc.accountId)}&per_page=${ZONES_PER_PAGE}&page=${page}`,
     );
-    const zones = Array.isArray(result) ? result : [];
+    // A "successful" envelope without a zone array is an upstream fault, not an account without
+    // zones: presenting it as an empty list would send the user hunting for missing permissions.
+    if (!Array.isArray(zones)) {
+      throw new UpstreamError(502, "Cloudflare API returned a zone list without a result array");
+    }
     all.push(...zones);
     // Prefer Cloudflare's page count (saves a trailing empty request when the zone count is an exact
     // multiple of the page size); fall back to the short-page heuristic when it is absent.
-    if (typeof info?.total_pages === "number" ? page >= info.total_pages : zones.length < ZONES_PER_PAGE) break;
+    if (typeof info?.total_pages === "number" ? page >= info.total_pages : zones.length < ZONES_PER_PAGE) {
+      complete = true;
+      break;
+    }
+  }
+  // Never present a truncated list as complete.
+  if (!complete) {
+    throw new UpstreamError(
+      502,
+      `account has more than ${MAX_ZONE_PAGES * ZONES_PER_PAGE} zones; the zone list would be incomplete`,
+    );
   }
   return json({
     zones: all
@@ -1445,6 +1460,13 @@ async function getWafSettings(acc: Account, url: URL): Promise<Response> {
 
 type AccessJwk = { kid?: string; n?: string; e?: string };
 type JwksCacheEntry = { keys: AccessJwk[]; exp: number; lastForcedRefreshAt: number };
+
+function isUsableAccessJwk(key: unknown): key is AccessJwk & { kid: string; n: string; e: string } {
+  if (!key || typeof key !== "object" || Array.isArray(key)) return false;
+  const { kid, n, e } = key as Record<string, unknown>;
+  return typeof kid === "string" && kid !== "" && typeof n === "string" && n !== "" &&
+    typeof e === "string" && e !== "";
+}
 const jwksCache = new Map<string, JwksCacheEntry>();
 const JWKS_TTL_MS = 3_600_000;
 const JWKS_UNKNOWN_KID_REFRESH_MS = 60_000;
@@ -1487,7 +1509,12 @@ async function getAccessJwks(teamDomain: string, refresh = false): Promise<Acces
       if (e instanceof DOMException && (e.name === "TimeoutError" || e.name === "AbortError")) throw e;
       throw new HttpError(403, "unable to fetch Access signing keys");
     }
-    return Array.isArray(body?.keys) ? (body.keys as AccessJwk[]) : [];
+    // Keep only well-formed RSA public keys, so a malformed entry (e.g. `null`) can neither crash the
+    // key lookup with a 500 nor be cached. A key set with nothing usable is a failed fetch: it is
+    // rejected with 403 and not cached, so the next request retries.
+    const usable = (Array.isArray(body?.keys) ? body.keys : []).filter(isUsableAccessJwk);
+    if (!usable.length) throw new HttpError(403, "unable to fetch Access signing keys");
+    return usable;
   });
   jwksCache.set(teamDomain, {
     keys,
