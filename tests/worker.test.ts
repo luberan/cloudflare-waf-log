@@ -1029,3 +1029,107 @@ describe("Audit hardening", () => {
     expect(response.headers.get("permissions-policy")).toContain("camera=()");
   });
 });
+
+describe("Upstream payload validation", () => {
+  beforeEach(() => {
+    vi.stubGlobal("caches", {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([null, undefined, {}, "zones"])("returns 502 for a successful zone list whose result is %j", async (result) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ success: true, result })));
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "Cloudflare API returned a zone list without a result array",
+    });
+  });
+
+  it("returns 502 instead of a silently truncated zone list at the pagination cap", async () => {
+    const upstream = vi.fn(async (input: unknown) => {
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      return Response.json({
+        success: true,
+        result: Array.from({ length: 50 }, (_, index) => ({
+          id: `z${page}-${index}`, name: `${page}-${index}.example`, plan: { name: "Free" },
+        })),
+        result_info: { page, total_pages: 201 },
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "account has more than 10000 zones; the zone list would be incomplete",
+    });
+    expect(upstream).toHaveBeenCalledTimes(200);
+  });
+
+  it("accepts exactly the pagination cap when it is the last page", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      return Response.json({
+        success: true,
+        result: [{ id: `z${page}`, name: `${page}.example`, plan: { name: "Free" } }],
+        result_info: { page, total_pages: 200 },
+      });
+    }));
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as any).zones).toHaveLength(200);
+  });
+
+  function accessRequest(teamDomain: string, kid = "k") {
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const token = [
+      encode({ alg: "RS256", kid }),
+      encode({ aud: "app", iss: teamDomain, exp: Math.floor(Date.now() / 1000) + 300 }),
+      Buffer.from("signature").toString("base64url"),
+    ].join(".");
+    return worker.fetch(
+      new Request("https://dashboard.test/api/accounts", { headers: { "cf-access-jwt-assertion": token } }),
+      configuredEnv({ CF_ACCESS_TEAM_DOMAIN: teamDomain, CF_ACCESS_AUD: "app" }),
+    );
+  }
+
+  it.each([
+    ["null entry", [null]],
+    ["non-object entry", ["key"]],
+    ["entry without key material", [{ kid: "k" }]],
+    ["no keys", []],
+  ])("rejects a JWKS with only a %s as 403 and does not cache it", async (_name, keys) => {
+    const teamDomain = `https://jwks-${String(_name).replace(/\W+/g, "-")}.cloudflareaccess.com`;
+    const certs = vi.fn(async () => Response.json({ keys }));
+    vi.stubGlobal("fetch", certs);
+
+    const first = await accessRequest(teamDomain);
+    const second = await accessRequest(teamDomain);
+
+    expect(first.status).toBe(403);
+    await expect(first.json()).resolves.toEqual({ error: "unable to fetch Access signing keys" });
+    expect(second.status).toBe(403);
+    expect(certs).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores malformed JWKS entries next to a usable key", async () => {
+    const teamDomain = "https://jwks-mixed.cloudflareaccess.com";
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+      keys: [null, 42, { kid: "other" }, { kid: "k", n: "AQAB", e: "AQAB" }],
+    })));
+    vi.stubGlobal("crypto", { subtle: { importKey: vi.fn(async () => ({})), verify: vi.fn(async () => true) } });
+
+    const response = await accessRequest(teamDomain);
+
+    expect(response.status).toBe(200);
+  });
+});
