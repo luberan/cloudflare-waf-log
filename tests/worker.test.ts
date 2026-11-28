@@ -1133,3 +1133,65 @@ describe("Upstream payload validation", () => {
     expect(response.status).toBe(200);
   });
 });
+
+describe("Zone pagination without page-count metadata", () => {
+  beforeEach(() => {
+    vi.stubGlobal("caches", {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function zonesWithoutMetadata(total: number) {
+    return vi.fn(async (input: unknown) => {
+      const offset = (Number(new URL(String(input)).searchParams.get("page")) - 1) * 50;
+      const result = Array.from({ length: Math.max(0, Math.min(50, total - offset)) }, (_, index) => ({
+        id: `z${offset + index}`, name: `${offset + index}.example`, plan: { name: "Free" },
+      }));
+      return Response.json({ success: true, result });
+    });
+  }
+
+  it("accepts exactly 10000 zones after one empty look-ahead page", async () => {
+    const upstream = zonesWithoutMetadata(10_000);
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as any).zones).toHaveLength(10_000);
+    expect(upstream).toHaveBeenCalledTimes(201);
+  });
+
+  it("rejects a list that continues past the look-ahead page", async () => {
+    const upstream = zonesWithoutMetadata(10_001);
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      error: "account has more than 10000 zones; the zone list would be incomplete",
+    });
+    expect(upstream).toHaveBeenCalledTimes(201);
+  });
+
+  it("does not spend a look-ahead request when the page count is reported", async () => {
+    const upstream = vi.fn(async (input: unknown) => {
+      const page = Number(new URL(String(input)).searchParams.get("page"));
+      return Response.json({
+        success: true,
+        result: Array.from({ length: 50 }, (_, index) => ({ id: `z${page}-${index}`, name: `${page}-${index}.example` })),
+        result_info: { page, total_pages: 200 },
+      });
+    });
+    vi.stubGlobal("fetch", upstream);
+
+    const response = await worker.fetch(new Request("http://127.0.0.1/api/zones?account=test"), configuredEnv());
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(200);
+  });
+});
