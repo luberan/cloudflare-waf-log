@@ -393,27 +393,40 @@ const ZONES_PER_PAGE = 50;
 // Hard stop against a misbehaving upstream that never returns a short page (10 000 zones).
 const MAX_ZONE_PAGES = 200;
 
+type Zone = { id: string; name: string; status: string; plan: { name: string } };
+
+async function fetchZonePage(acc: Account, page: number): Promise<{ zones: Zone[]; totalPages?: number }> {
+  const { result: zones, result_info: info } = await cfFetchEnvelope<Zone[]>(
+    acc,
+    `/zones?account.id=${encodeURIComponent(acc.accountId)}&per_page=${ZONES_PER_PAGE}&page=${page}`,
+  );
+  // A "successful" envelope without a zone array is an upstream fault, not an account without
+  // zones: presenting it as an empty list would send the user hunting for missing permissions.
+  if (!Array.isArray(zones)) {
+    throw new UpstreamError(502, "Cloudflare API returned a zone list without a result array");
+  }
+  return { zones, totalPages: typeof info?.total_pages === "number" ? info.total_pages : undefined };
+}
+
 async function listZones(acc: Account): Promise<Response> {
-  type Zone = { id: string; name: string; status: string; plan: { name: string } };
   const all: Zone[] = [];
   let complete = false;
+  let lastPageHadCount = false;
   for (let page = 1; page <= MAX_ZONE_PAGES; page++) {
-    const { result: zones, result_info: info } = await cfFetchEnvelope<Zone[]>(
-      acc,
-      `/zones?account.id=${encodeURIComponent(acc.accountId)}&per_page=${ZONES_PER_PAGE}&page=${page}`,
-    );
-    // A "successful" envelope without a zone array is an upstream fault, not an account without
-    // zones: presenting it as an empty list would send the user hunting for missing permissions.
-    if (!Array.isArray(zones)) {
-      throw new UpstreamError(502, "Cloudflare API returned a zone list without a result array");
-    }
+    const { zones, totalPages } = await fetchZonePage(acc, page);
     all.push(...zones);
+    lastPageHadCount = totalPages !== undefined;
     // Prefer Cloudflare's page count (saves a trailing empty request when the zone count is an exact
     // multiple of the page size); fall back to the short-page heuristic when it is absent.
-    if (typeof info?.total_pages === "number" ? page >= info.total_pages : zones.length < ZONES_PER_PAGE) {
+    if (totalPages !== undefined ? page >= totalPages : zones.length < ZONES_PER_PAGE) {
       complete = true;
       break;
     }
+  }
+  // Without page-count metadata, a full last page cannot tell "exactly at the limit" from "more
+  // zones follow". One bounded look-ahead settles it: only an empty next page proves completeness.
+  if (!complete && !lastPageHadCount) {
+    complete = (await fetchZonePage(acc, MAX_ZONE_PAGES + 1)).zones.length === 0;
   }
   // Never present a truncated list as complete.
   if (!complete) {
